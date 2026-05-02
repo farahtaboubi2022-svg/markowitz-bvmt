@@ -8,32 +8,26 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.optimize import minimize
 
-# ==============================
-# Configuration page
-# ==============================
-
 st.set_page_config(page_title="Markowitz BVMT", layout="wide")
 
 st.title("📊 Tableau de bord Markowitz - BVMT")
 st.write("Analyse financière et optimisation de portefeuille selon la théorie de Markowitz.")
 
 # ==============================
-# Chargement automatique des fichiers Excel
+# Chargement automatique des Excel
 # ==============================
 
 BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "data"
 
-excel_files = list(DATA_DIR.glob("*.xlsx"))
-
-if not DATA_DIR.exists():
-    st.error("Le dossier 'data' n'existe pas. Crée un dossier data au même niveau que app.py.")
-    st.stop()
+excel_files = sorted(
+    list(BASE_DIR.glob("*.xlsx")) +
+    list(BASE_DIR.glob("*.xls"))
+)
 
 if not excel_files:
-    st.error("Aucun fichier Excel trouvé dans le dossier data.")
-    st.write("Chemin recherché :", DATA_DIR)
-    st.write("Contenu du dossier du projet :", list(BASE_DIR.glob("*")))
+    st.error("Aucun fichier Excel trouvé à côté de app.py.")
+    st.write("Chemin recherché :", BASE_DIR)
+    st.write("Fichiers trouvés :", list(BASE_DIR.glob("*")))
     st.stop()
 
 st.success(f"{len(excel_files)} fichier(s) Excel chargé(s) automatiquement.")
@@ -41,8 +35,16 @@ st.success(f"{len(excel_files)} fichier(s) Excel chargé(s) automatiquement.")
 all_data = []
 
 for file in excel_files:
-    df = pd.read_excel(file)
-    all_data.append(df)
+    try:
+        df = pd.read_excel(file)
+        df["Fichier_source"] = file.name
+        all_data.append(df)
+    except Exception as e:
+        st.warning(f"Impossible de lire le fichier {file.name} : {e}")
+
+if not all_data:
+    st.error("Aucun fichier Excel lisible.")
+    st.stop()
 
 data = pd.concat(all_data, ignore_index=True)
 
@@ -54,11 +56,10 @@ data.columns = data.columns.astype(str).str.strip()
 data = data.loc[:, ~data.columns.duplicated()]
 
 required_columns = ["SEANCE", "VALEUR", "CLOTURE"]
-
 missing_columns = [col for col in required_columns if col not in data.columns]
 
 if missing_columns:
-    st.error(f"Colonnes manquantes dans les fichiers Excel : {missing_columns}")
+    st.error(f"Colonnes manquantes : {missing_columns}")
     st.write("Colonnes trouvées :", list(data.columns))
     st.stop()
 
@@ -115,12 +116,12 @@ banques = [
 banques_valides = [b for b in banques if b in prices.columns]
 
 if len(banques_valides) < 2:
-    st.error("Moins de deux banques valides trouvées dans les fichiers Excel.")
+    st.error("Moins de deux banques valides trouvées.")
     st.write("Sociétés trouvées :", list(prices.columns))
     st.stop()
 
 # ==============================
-# Sidebar
+# Paramètres
 # ==============================
 
 st.sidebar.header("Paramètres")
@@ -193,11 +194,10 @@ result_sharpe = minimize(
 )
 
 if not result_sharpe.success:
-    st.error("Erreur lors de l'optimisation du portefeuille Sharpe.")
+    st.error("Erreur lors de l'optimisation Sharpe.")
     st.stop()
 
 weights_sharpe = result_sharpe.x
-
 ret_sharpe = port_return(weights_sharpe)
 vol_sharpe = port_vol(weights_sharpe)
 sharpe_ratio = (ret_sharpe - rf) / vol_sharpe
@@ -211,11 +211,10 @@ result_minvar = minimize(
 )
 
 if not result_minvar.success:
-    st.error("Erreur lors de l'optimisation du portefeuille à variance minimale.")
+    st.error("Erreur lors de l'optimisation variance minimale.")
     st.stop()
 
 weights_minvar = result_minvar.x
-
 ret_minvar = port_return(weights_minvar)
 vol_minvar = port_vol(weights_minvar)
 sharpe_minvar = (ret_minvar - rf) / vol_minvar
@@ -227,7 +226,7 @@ weights_df = pd.DataFrame({
 })
 
 # ==============================
-# Interface
+# Tableau de bord
 # ==============================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
