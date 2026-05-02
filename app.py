@@ -1,4 +1,6 @@
 import io
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,23 +13,31 @@ st.set_page_config(page_title="Markowitz BVMT", layout="wide")
 st.title("📊 Tableau de bord Markowitz - BVMT")
 st.write("Analyse financière et optimisation de portefeuille selon la théorie de Markowitz.")
 
-uploaded_files = st.file_uploader(
-    "Importer les fichiers Excel BVMT 2021-2025",
-    type=["xlsx"],
-    accept_multiple_files=True
-)
+# ==============================
+# Chargement automatique Excel
+# ==============================
 
-if not uploaded_files:
-    st.info("Importer les fichiers Excel BVMT pour commencer.")
+DATA_DIR = Path("data")
+
+excel_files = list(DATA_DIR.glob("*.xlsx"))
+
+if not excel_files:
+    st.error("Aucun fichier Excel trouvé dans le dossier data.")
     st.stop()
+
+st.success(f"{len(excel_files)} fichier(s) Excel chargé(s) automatiquement.")
 
 all_data = []
 
-for file in uploaded_files:
+for file in excel_files:
     df = pd.read_excel(file)
     all_data.append(df)
 
 data = pd.concat(all_data, ignore_index=True)
+
+# ==============================
+# Nettoyage des données
+# ==============================
 
 data.columns = data.columns.astype(str).str.strip()
 data = data.loc[:, ~data.columns.duplicated()]
@@ -57,6 +67,10 @@ prices = data.pivot_table(
 
 prices = prices.sort_index().ffill()
 
+# ==============================
+# Liste des banques
+# ==============================
+
 banques = [
     "BIAT",
     "ATB",
@@ -75,6 +89,14 @@ banques = [
 
 banques_valides = [b for b in banques if b in prices.columns]
 
+if len(banques_valides) < 2:
+    st.error("Moins de deux banques valides trouvées dans les fichiers Excel.")
+    st.stop()
+
+# ==============================
+# Sidebar
+# ==============================
+
 st.sidebar.header("Paramètres")
 
 selected_banques = st.sidebar.multiselect(
@@ -92,6 +114,10 @@ rf = st.sidebar.number_input(
 if len(selected_banques) < 2:
     st.warning("Choisir au moins deux banques.")
     st.stop()
+
+# ==============================
+# Calculs financiers
+# ==============================
 
 selected_prices = prices[selected_banques].dropna(how="all").ffill()
 returns = selected_prices.pct_change().dropna()
@@ -122,9 +148,13 @@ def neg_sharpe(w):
         return 999
     return -(port_return(w) - rf) / vol
 
+def min_vol(w):
+    return port_vol(w)
+
 constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
 bounds = tuple((0, 1) for _ in range(n))
 
+# Portefeuille Sharpe max
 result_sharpe = minimize(
     neg_sharpe,
     init,
@@ -134,14 +164,11 @@ result_sharpe = minimize(
 )
 
 weights_sharpe = result_sharpe.x
-
 ret_sharpe = port_return(weights_sharpe)
 vol_sharpe = port_vol(weights_sharpe)
 sharpe_ratio = (ret_sharpe - rf) / vol_sharpe
 
-def min_vol(w):
-    return port_vol(w)
-
+# Portefeuille variance minimale
 result_minvar = minimize(
     min_vol,
     init,
@@ -151,7 +178,6 @@ result_minvar = minimize(
 )
 
 weights_minvar = result_minvar.x
-
 ret_minvar = port_return(weights_minvar)
 vol_minvar = port_vol(weights_minvar)
 sharpe_minvar = (ret_minvar - rf) / vol_minvar
@@ -161,6 +187,10 @@ weights_df = pd.DataFrame({
     "Poids Sharpe max": weights_sharpe,
     "Poids variance minimale": weights_minvar
 })
+
+# ==============================
+# Interface
+# ==============================
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Vue générale",
