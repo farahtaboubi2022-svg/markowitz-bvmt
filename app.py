@@ -8,21 +8,32 @@ import plotly.express as px
 import plotly.graph_objects as go
 from scipy.optimize import minimize
 
+# ==============================
+# Configuration page
+# ==============================
+
 st.set_page_config(page_title="Markowitz BVMT", layout="wide")
 
 st.title("📊 Tableau de bord Markowitz - BVMT")
 st.write("Analyse financière et optimisation de portefeuille selon la théorie de Markowitz.")
 
 # ==============================
-# Chargement automatique Excel
+# Chargement automatique des fichiers Excel
 # ==============================
 
-DATA_DIR = Path("data")
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
 
 excel_files = list(DATA_DIR.glob("*.xlsx"))
 
+if not DATA_DIR.exists():
+    st.error("Le dossier 'data' n'existe pas. Crée un dossier data au même niveau que app.py.")
+    st.stop()
+
 if not excel_files:
     st.error("Aucun fichier Excel trouvé dans le dossier data.")
+    st.write("Chemin recherché :", DATA_DIR)
+    st.write("Contenu du dossier du projet :", list(BASE_DIR.glob("*")))
     st.stop()
 
 st.success(f"{len(excel_files)} fichier(s) Excel chargé(s) automatiquement.")
@@ -42,6 +53,15 @@ data = pd.concat(all_data, ignore_index=True)
 data.columns = data.columns.astype(str).str.strip()
 data = data.loc[:, ~data.columns.duplicated()]
 
+required_columns = ["SEANCE", "VALEUR", "CLOTURE"]
+
+missing_columns = [col for col in required_columns if col not in data.columns]
+
+if missing_columns:
+    st.error(f"Colonnes manquantes dans les fichiers Excel : {missing_columns}")
+    st.write("Colonnes trouvées :", list(data.columns))
+    st.stop()
+
 data = data[["SEANCE", "VALEUR", "CLOTURE"]]
 data.columns = ["Date", "Societe", "Close"]
 
@@ -55,8 +75,13 @@ data["Close"] = (
 )
 
 data["Close"] = pd.to_numeric(data["Close"], errors="coerce")
+
 data = data.dropna()
 data = data[data["Close"] > 0]
+
+if data.empty:
+    st.error("Les données sont vides après nettoyage.")
+    st.stop()
 
 prices = data.pivot_table(
     index="Date",
@@ -68,7 +93,7 @@ prices = data.pivot_table(
 prices = prices.sort_index().ffill()
 
 # ==============================
-# Liste des banques
+# Banques
 # ==============================
 
 banques = [
@@ -91,6 +116,7 @@ banques_valides = [b for b in banques if b in prices.columns]
 
 if len(banques_valides) < 2:
     st.error("Moins de deux banques valides trouvées dans les fichiers Excel.")
+    st.write("Sociétés trouvées :", list(prices.columns))
     st.stop()
 
 # ==============================
@@ -121,6 +147,10 @@ if len(selected_banques) < 2:
 
 selected_prices = prices[selected_banques].dropna(how="all").ffill()
 returns = selected_prices.pct_change().dropna()
+
+if returns.empty:
+    st.error("Pas assez de données pour calculer les rendements.")
+    st.stop()
 
 mean_returns = returns.mean() * 252
 volatility = returns.std() * np.sqrt(252)
@@ -154,7 +184,6 @@ def min_vol(w):
 constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
 bounds = tuple((0, 1) for _ in range(n))
 
-# Portefeuille Sharpe max
 result_sharpe = minimize(
     neg_sharpe,
     init,
@@ -163,12 +192,16 @@ result_sharpe = minimize(
     constraints=constraints
 )
 
+if not result_sharpe.success:
+    st.error("Erreur lors de l'optimisation du portefeuille Sharpe.")
+    st.stop()
+
 weights_sharpe = result_sharpe.x
+
 ret_sharpe = port_return(weights_sharpe)
 vol_sharpe = port_vol(weights_sharpe)
 sharpe_ratio = (ret_sharpe - rf) / vol_sharpe
 
-# Portefeuille variance minimale
 result_minvar = minimize(
     min_vol,
     init,
@@ -177,7 +210,12 @@ result_minvar = minimize(
     constraints=constraints
 )
 
+if not result_minvar.success:
+    st.error("Erreur lors de l'optimisation du portefeuille à variance minimale.")
+    st.stop()
+
 weights_minvar = result_minvar.x
+
 ret_minvar = port_return(weights_minvar)
 vol_minvar = port_vol(weights_minvar)
 sharpe_minvar = (ret_minvar - rf) / vol_minvar
