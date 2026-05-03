@@ -14,14 +14,15 @@ st.title("📊 Tableau de bord Markowitz - BVMT")
 st.write("Analyse financière et optimisation de portefeuille selon la théorie de Markowitz.")
 
 # ==============================
-# Chargement automatique des Excel
+# Chargement automatique Excel
 # ==============================
 
 BASE_DIR = Path(__file__).parent
 
 excel_files = sorted(
     list(BASE_DIR.glob("*.xlsx")) +
-    list(BASE_DIR.glob("*.xls"))
+    list(BASE_DIR.glob("*.xls")) +
+    list(BASE_DIR.glob("*.xlsx.xlsx"))
 )
 
 if not excel_files:
@@ -30,17 +31,21 @@ if not excel_files:
     st.write("Fichiers trouvés :", list(BASE_DIR.glob("*")))
     st.stop()
 
-st.success(f"{len(excel_files)} fichier(s) Excel chargé(s) automatiquement.")
+st.sidebar.success(f"{len(excel_files)} fichier(s) Excel détecté(s)")
 
 all_data = []
 
 for file in excel_files:
     try:
-        df = pd.read_excel(file)
-        df["Fichier_source"] = file.name
-        all_data.append(df)
+        sheets = pd.read_excel(file, sheet_name=None)
+
+        for sheet_name, df in sheets.items():
+            df["Source"] = file.name
+            df["Feuille"] = sheet_name
+            all_data.append(df)
+
     except Exception as e:
-        st.warning(f"Impossible de lire le fichier {file.name} : {e}")
+        st.warning(f"Erreur lecture {file.name} : {e}")
 
 if not all_data:
     st.error("Aucun fichier Excel lisible.")
@@ -83,6 +88,14 @@ data = data[data["Close"] > 0]
 if data.empty:
     st.error("Les données sont vides après nettoyage.")
     st.stop()
+
+data["Année"] = data["Date"].dt.year
+
+st.sidebar.write("📅 Période détectée :")
+st.sidebar.write(data["Date"].min(), "→", data["Date"].max())
+
+st.sidebar.write("📊 Années disponibles :")
+st.sidebar.write(sorted(data["Année"].dropna().unique()))
 
 prices = data.pivot_table(
     index="Date",
@@ -129,7 +142,7 @@ st.sidebar.header("Paramètres")
 selected_banques = st.sidebar.multiselect(
     "Choisir les banques",
     options=banques_valides,
-    default=banques_valides[:min(5, len(banques_valides))]
+    default=banques_valides[:min(6, len(banques_valides))]
 )
 
 rf = st.sidebar.number_input(
@@ -163,6 +176,8 @@ metrics = pd.DataFrame({
     "Volatilité annualisée": volatility,
     "Sharpe individuel": (mean_returns - rf) / volatility
 })
+
+metrics = metrics.replace([np.inf, -np.inf], np.nan).dropna()
 
 n = len(selected_banques)
 init = np.ones(n) / n
@@ -226,16 +241,21 @@ weights_df = pd.DataFrame({
 })
 
 # ==============================
-# Tableau de bord
+# Tabs
 # ==============================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Vue générale",
     "Indicateurs",
     "Optimisation",
     "Frontière efficiente",
-    "Export"
+    "Export",
+    "Aide investisseur"
 ])
+
+# ==============================
+# Tab 1
+# ==============================
 
 with tab1:
     st.subheader("Évolution des prix")
@@ -244,6 +264,7 @@ with tab1:
         selected_prices,
         title="Cours de clôture des banques sélectionnées"
     )
+    fig_prices.update_layout(xaxis_title="Date", yaxis_title="Prix")
     st.plotly_chart(fig_prices, use_container_width=True)
 
     st.subheader("Rentabilité cumulée")
@@ -257,6 +278,26 @@ with tab1:
     fig_cum.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_cum, use_container_width=True)
 
+    st.subheader("Rendement vs Risque")
+
+    risk_return = metrics.reset_index().rename(columns={"index": "Banque"})
+
+    fig_scatter = px.scatter(
+        risk_return,
+        x="Volatilité annualisée",
+        y="Rentabilité annualisée",
+        text="Banque",
+        size="Sharpe individuel",
+        title="Comparaison rendement / risque"
+    )
+    fig_scatter.update_xaxes(tickformat=".0%")
+    fig_scatter.update_yaxes(tickformat=".0%")
+    st.plotly_chart(fig_scatter, use_container_width=True)
+
+# ==============================
+# Tab 2
+# ==============================
+
 with tab2:
     st.subheader("Indicateurs par banque")
 
@@ -269,6 +310,14 @@ with tab2:
         use_container_width=True
     )
 
+    fig_ret = px.bar(
+        metrics,
+        y="Rentabilité annualisée",
+        title="Rentabilité annualisée par banque"
+    )
+    fig_ret.update_yaxes(tickformat=".0%")
+    st.plotly_chart(fig_ret, use_container_width=True)
+
     fig_vol = px.bar(
         metrics,
         y="Volatilité annualisée",
@@ -277,11 +326,28 @@ with tab2:
     fig_vol.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_vol, use_container_width=True)
 
+    fig_sharpe = px.bar(
+        metrics,
+        y="Sharpe individuel",
+        title="Ratio de Sharpe individuel par banque"
+    )
+    st.plotly_chart(fig_sharpe, use_container_width=True)
+
     st.subheader("Matrice variance-covariance")
     st.dataframe(cov_matrix, use_container_width=True)
 
     st.subheader("Matrice de corrélation")
-    st.dataframe(corr_matrix, use_container_width=True)
+
+    fig_corr = px.imshow(
+        corr_matrix,
+        text_auto=True,
+        title="Heatmap de corrélation"
+    )
+    st.plotly_chart(fig_corr, use_container_width=True)
+
+# ==============================
+# Tab 3
+# ==============================
 
 with tab3:
     st.subheader("Portefeuille optimal Sharpe")
@@ -324,6 +390,30 @@ with tab3:
     )
     fig_weights.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_weights, use_container_width=True)
+
+    st.subheader("Camembert - Portefeuille Sharpe max")
+
+    fig_pie_sharpe = px.pie(
+        weights_df,
+        names="Banque",
+        values="Poids Sharpe max",
+        title="Répartition du portefeuille optimal Sharpe"
+    )
+    st.plotly_chart(fig_pie_sharpe, use_container_width=True)
+
+    st.subheader("Camembert - Portefeuille variance minimale")
+
+    fig_pie_minvar = px.pie(
+        weights_df,
+        names="Banque",
+        values="Poids variance minimale",
+        title="Répartition du portefeuille à risque minimal"
+    )
+    st.plotly_chart(fig_pie_minvar, use_container_width=True)
+
+# ==============================
+# Tab 4
+# ==============================
 
 with tab4:
     st.subheader("Frontière efficiente")
@@ -388,6 +478,10 @@ with tab4:
 
     st.plotly_chart(fig_frontier, use_container_width=True)
 
+# ==============================
+# Tab 5
+# ==============================
+
 with tab5:
     st.subheader("Télécharger les résultats")
 
@@ -406,4 +500,76 @@ with tab5:
         data=output.getvalue(),
         file_name="rapport_markowitz_bvmt.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+# ==============================
+# Tab 6
+# ==============================
+
+with tab6:
+    st.subheader("📈 Aide à la décision pour investisseurs BVMT")
+
+    st.info(
+        "Cette section est informative. Elle ne constitue pas un conseil financier personnalisé."
+    )
+
+    ranking = metrics.copy()
+
+    ranking["Score"] = (
+        ranking["Sharpe individuel"].rank(ascending=False) +
+        ranking["Rentabilité annualisée"].rank(ascending=False) +
+        ranking["Volatilité annualisée"].rank(ascending=True)
+    )
+
+    ranking = ranking.sort_values("Score")
+
+    st.subheader("Classement indicatif des banques")
+
+    st.dataframe(
+        ranking.style.format({
+            "Rentabilité annualisée": "{:.2%}",
+            "Volatilité annualisée": "{:.2%}",
+            "Sharpe individuel": "{:.4f}",
+            "Score": "{:.0f}"
+        }),
+        use_container_width=True
+    )
+
+    best_bank = ranking.index[0]
+
+    st.success(f"🏆 Meilleure banque selon le modèle : {best_bank}")
+
+    fig_score = px.bar(
+        ranking,
+        y="Score",
+        title="Score indicatif des banques"
+    )
+    st.plotly_chart(fig_score, use_container_width=True)
+
+    fig_best = px.bar(
+        ranking,
+        y=["Rentabilité annualisée", "Volatilité annualisée"],
+        barmode="group",
+        title="Rentabilité vs Risque par banque"
+    )
+    fig_best.update_yaxes(tickformat=".0%")
+    st.plotly_chart(fig_best, use_container_width=True)
+
+    st.subheader("Interprétation pour l’investisseur")
+
+    st.write("""
+    Ce tableau de bord aide un investisseur intéressé par la BVMT à analyser les banques cotées
+    selon trois critères principaux :
+
+    - la rentabilité annualisée ;
+    - la volatilité, qui mesure le risque ;
+    - le ratio de Sharpe, qui compare la rentabilité au risque.
+
+    Le portefeuille optimal Sharpe cherche la meilleure combinaison rendement / risque.
+    Le portefeuille à variance minimale cherche à réduire le risque au maximum.
+    """)
+
+    st.warning(
+        "Avant tout investissement réel, il faut vérifier la liquidité du titre, "
+        "les frais, la fiscalité, les conditions du compte titres et la réglementation en vigueur."
     )
