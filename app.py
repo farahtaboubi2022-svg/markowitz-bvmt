@@ -83,7 +83,7 @@ def prepare_data(data):
 
     data["Année"] = data["Date"].dt.year
     
-    # Convertir les années en int Python natif
+    # Convertir en entier Python natif
     data["Année"] = data["Année"].astype(int)
 
     prices = data.pivot_table(
@@ -184,8 +184,9 @@ if prices.empty:
 st.sidebar.write("📅 Période détectée")
 st.sidebar.write(data["Date"].min(), "→", data["Date"].max())
 
-annees_disponibles = sorted(data["Année"].dropna().unique())
-st.sidebar.write("📊 Années disponibles")
+# Récupérer les années disponibles et les convertir en int Python
+annees_disponibles = sorted([int(a) for a in data["Année"].dropna().unique()])
+st.sidebar.write("📊 Années disponibles dans les données")
 st.sidebar.write(annees_disponibles)
 
 # Afficher le nombre de lignes par année
@@ -194,18 +195,53 @@ for annee in annees_disponibles:
     nb_lignes = len(data[data["Année"] == annee])
     st.sidebar.write(f"   {annee}: {nb_lignes} lignes")
 
-# Afficher les sociétés disponibles
-societes_disponibles = sorted(prices.columns.tolist())
-st.sidebar.write("🏦 Sociétés disponibles:")
+# ==============================
+# Sélection de la période (année)
+# ==============================
+
+st.sidebar.header("📅 Sélection de la période")
+
+# Convertir les années en liste de strings pour l'affichage
+options_annees = [str(a) for a in annees_disponibles]
+selected_annee_str = st.sidebar.selectbox(
+    "Choisir l'année à analyser",
+    options=options_annees,
+    index=len(options_annees)-1 if options_annees else 0  # Dernière année par défaut
+)
+
+# Convertir la sélection en entier
+selected_annee = int(selected_annee_str)
+
+st.sidebar.info(f"📊 Analyse limitée à l'année {selected_annee}")
+
+# Filtrer les données par année
+data_filtered = data[data["Année"] == selected_annee].copy()
+
+if data_filtered.empty:
+    st.error(f"Aucune donnée trouvée pour l'année {selected_annee}")
+    st.stop()
+
+# Recréer les prix pour l'année sélectionnée
+prices_filtered = data_filtered.pivot_table(
+    index="Date",
+    columns="Societe",
+    values="Close",
+    aggfunc="last"
+).sort_index().ffill()
+
+# ==============================
+# Banques disponibles
+# ==============================
+
+# Afficher les sociétés disponibles pour l'année sélectionnée
+societes_disponibles = sorted(prices_filtered.columns.tolist())
+st.sidebar.write(f"🏦 Sociétés disponibles en {selected_annee}:")
 for s in societes_disponibles[:10]:  # Limiter l'affichage
     st.sidebar.write(f"   - {s}")
 if len(societes_disponibles) > 10:
     st.sidebar.write(f"   ... et {len(societes_disponibles)-10} autres")
 
-# ==============================
-# Banques (filtrer parmi les sociétés disponibles)
-# ==============================
-
+# Liste des banques à rechercher
 banques = [
     "BIAT",
     "ATB",
@@ -223,35 +259,35 @@ banques = [
 ]
 
 # Nettoyer les noms de colonnes
-prices.columns = prices.columns.str.strip()
+prices_filtered.columns = prices_filtered.columns.str.strip()
 
-# Trouver les banques présentes dans les données
+# Trouver les banques présentes dans les données pour l'année sélectionnée
 banques_valides = []
 for b in banques:
     # Recherche exacte et insensible à la casse
-    matching_cols = [col for col in prices.columns if col.upper() == b.upper()]
+    matching_cols = [col for col in prices_filtered.columns if col.upper() == b.upper()]
     if matching_cols:
         banques_valides.append(matching_cols[0])
 
 # Si aucune banque trouvée, utiliser toutes les sociétés
 if len(banques_valides) < 2:
-    st.warning(f"⚠️ Banques spécifiques non trouvées. {len(prices.columns)} société(s) disponible(s).")
-    banques_valides = list(prices.columns)
+    st.warning(f"⚠️ Banques spécifiques non trouvées pour {selected_annee}. {len(prices_filtered.columns)} société(s) disponible(s).")
+    banques_valides = list(prices_filtered.columns)
     if len(banques_valides) < 2:
-        st.error("Pas assez de sociétés pour l'analyse.")
+        st.error(f"Pas assez de sociétés pour l'analyse en {selected_annee}.")
         st.stop()
     else:
         st.info(f"📊 Utilisation de toutes les sociétés disponibles ({len(banques_valides)})")
 
 # ==============================
-# Paramètres
+# Paramètres d'analyse
 # ==============================
 
-st.sidebar.header("Paramètres d'analyse")
+st.sidebar.header("⚙️ Paramètres d'analyse")
 
 # Sélection des banques à analyser
 selected_banques = st.sidebar.multiselect(
-    "Choisir les banques/sociétés à analyser",
+    f"Choisir les banques/sociétés à analyser ({selected_annee})",
     options=banques_valides,
     default=banques_valides[:min(6, len(banques_valides))]
 )
@@ -273,30 +309,32 @@ if len(selected_banques) < 2:
     st.stop()
 
 # ==============================
-# Suite du code (calculs financiers, etc.)
+# Calculs financiers pour l'année sélectionnée
 # ==============================
 
 try:
-    selected_prices = prices[selected_banques].dropna(how="all").ffill()
+    selected_prices = prices_filtered[selected_banques].dropna(how="all").ffill()
     
     # Vérifier qu'on a assez de données
     if len(selected_prices) < 2:
-        st.error("Pas assez de données de prix pour l'analyse.")
+        st.error(f"Pas assez de données de prix pour l'année {selected_annee}.")
         st.stop()
     
     returns = selected_prices.pct_change().dropna()
     
     if returns.empty or len(returns) < 2:
-        st.error("Pas assez de données pour calculer les rendements.")
+        st.error(f"Pas assez de données pour calculer les rendements en {selected_annee}.")
         st.stop()
     
+    # Pour une analyse annuelle, on utilise les données quotidiennes
+    # Annualisation: 252 jours de bourse
     mean_returns = returns.mean() * 252
     volatility = returns.std() * np.sqrt(252)
     cov_matrix = returns.cov() * 252
     corr_matrix = returns.corr()
     
     cumulative_returns = (1 + returns).cumprod() - 1
-    rolling_vol = returns.rolling(30).std() * np.sqrt(252)
+    rolling_vol = returns.rolling(20).std() * np.sqrt(252)  # 20 jours pour l'année
     
     drawdown = selected_prices / selected_prices.cummax() - 1
     max_drawdown = drawdown.min()
@@ -308,8 +346,8 @@ try:
     
     beta = {}
     for col in returns.columns:
-        cov = np.cov(returns[col], market_return)[0][1]
-        var = np.var(market_return)
+        cov = np.cov(returns[col], market_return)[0][1] if len(market_return) > 1 else 0
+        var = np.var(market_return) if len(market_return) > 1 else 1
         beta[col] = cov / var if var != 0 else np.nan
     
     beta = pd.Series(beta)
@@ -429,8 +467,10 @@ else:
     best_bank = "N/A"
 
 # ==============================
-# Interface principale (suite)
+# Interface principale
 # ==============================
+
+st.header(f"📊 Analyse pour l'année {selected_annee}")
 
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
     "📊 Vue générale",
@@ -444,7 +484,7 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 ])
 
 with tab1:
-    st.subheader("Résumé global")
+    st.subheader(f"Résumé global - Année {selected_annee}")
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Nombre de sociétés", len(selected_banques))
@@ -454,19 +494,18 @@ with tab1:
     
     # Graphique des cours
     if not selected_prices.empty:
-        fig_prices = px.line(selected_prices, title="Évolution des cours de clôture")
+        fig_prices = px.line(selected_prices, title=f"Évolution des cours de clôture - {selected_annee}")
         fig_prices.update_layout(xaxis_title="Date", yaxis_title="Cours (TND)")
         st.plotly_chart(fig_prices, use_container_width=True)
     
     # Graphique des rendements cumulés
     if not cumulative_returns.empty:
-        fig_cum = px.line(cumulative_returns, title="Rentabilité cumulée")
+        fig_cum = px.line(cumulative_returns, title=f"Rentabilité cumulée - {selected_annee}")
         fig_cum.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_cum, use_container_width=True)
 
-# Le reste des tabs reste identique...
 with tab2:
-    st.subheader("Tableau des indicateurs")
+    st.subheader(f"Tableau des indicateurs - {selected_annee}")
     
     if not metrics.empty:
         st.dataframe(
@@ -484,31 +523,36 @@ with tab2:
     
     # Graphiques
     if not metrics["Rentabilité annualisée"].dropna().empty:
-        fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité annualisée")
+        fig_ret = px.bar(metrics, y="Rentabilité annualisée", title=f"Rentabilité annualisée - {selected_annee}")
         fig_ret.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_ret, use_container_width=True)
+    
+    if not metrics["Volatilité annualisée"].dropna().empty:
+        fig_vol = px.bar(metrics, y="Volatilité annualisée", title=f"Volatilité annualisée - {selected_annee}")
+        fig_vol.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_vol, use_container_width=True)
 
 with tab3:
-    st.subheader("Analyse des risques")
+    st.subheader(f"Analyse des risques - {selected_annee}")
     
     if not drawdown.empty and not drawdown.isna().all().all():
-        fig_drawdown = px.line(drawdown, title="Drawdown des sociétés sélectionnées")
+        fig_drawdown = px.line(drawdown, title=f"Drawdown des sociétés - {selected_annee}")
         fig_drawdown.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_drawdown, use_container_width=True)
     
     if not corr_matrix.empty:
-        fig_corr = px.imshow(corr_matrix, text_auto=True, title="Matrice de corrélation", aspect="auto")
+        fig_corr = px.imshow(corr_matrix, text_auto=True, title=f"Matrice de corrélation - {selected_annee}", aspect="auto")
         st.plotly_chart(fig_corr, use_container_width=True)
 
 with tab4:
-    st.subheader("Portefeuille Sharpe maximum")
+    st.subheader(f"Portefeuille Sharpe maximum - {selected_annee}")
     
     c1, c2, c3 = st.columns(3)
     c1.metric("Rentabilité", f"{float(ret_sharpe):.2%}")
     c2.metric("Risque", f"{float(vol_sharpe):.2%}")
     c3.metric("Sharpe", f"{float(sharpe_ratio):.4f}")
     
-    st.subheader("Portefeuille variance minimale")
+    st.subheader(f"Portefeuille variance minimale - {selected_annee}")
     
     c4, c5, c6 = st.columns(3)
     c4.metric("Rentabilité", f"{float(ret_minvar):.2%}")
@@ -529,7 +573,7 @@ with tab4:
         )
 
 with tab5:
-    st.subheader("Frontière efficiente")
+    st.subheader(f"Frontière efficiente - {selected_annee}")
     
     frontier_returns = []
     frontier_vols = []
@@ -584,7 +628,7 @@ with tab5:
         ))
         
         fig_frontier.update_layout(
-            title="Frontière efficiente de Markowitz",
+            title=f"Frontière efficiente de Markowitz - {selected_annee}",
             xaxis_title="Risque / Volatilité",
             yaxis_title="Rentabilité"
         )
@@ -598,7 +642,7 @@ with tab5:
         st.warning(f"Erreur lors du calcul de la frontière efficiente : {e}")
 
 with tab6:
-    st.subheader("🤖 Recommandations intelligentes")
+    st.subheader(f"🤖 Recommandations intelligentes - {selected_annee}")
     st.info("Cette analyse est indicative et ne constitue pas un conseil financier personnalisé.")
     
     if not ranking.empty:
@@ -606,28 +650,36 @@ with tab6:
         st.dataframe(ranking, use_container_width=True)
 
 with tab7:
-    st.subheader("💼 Simulation d'investissement")
+    st.subheader(f"💼 Simulation d'investissement - {selected_annee}")
     st.write(f"Capital simulé : **{capital:,.2f} TND**")
     
     if not weights_df.empty:
-        st.dataframe(weights_df[["Banque", "Montant Sharpe max", "Montant variance minimale"]], use_container_width=True)
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Portefeuille Sharpe max")
+            st.dataframe(weights_df[["Banque", "Montant Sharpe max"]], use_container_width=True)
+        
+        with col2:
+            st.subheader("Portefeuille Variance min")
+            st.dataframe(weights_df[["Banque", "Montant variance minimale"]], use_container_width=True)
 
 with tab8:
-    st.subheader("Télécharger le rapport Excel")
+    st.subheader(f"Télécharger le rapport Excel - {selected_annee}")
     
     try:
         output = io.BytesIO()
         
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            selected_prices.to_excel(writer, sheet_name="Prix")
-            returns.to_excel(writer, sheet_name="Rendements")
-            metrics.to_excel(writer, sheet_name="Indicateurs")
-            weights_df.to_excel(writer, sheet_name="Poids", index=False)
+            selected_prices.to_excel(writer, sheet_name=f"Prix_{selected_annee}")
+            returns.to_excel(writer, sheet_name=f"Rendements_{selected_annee}")
+            metrics.to_excel(writer, sheet_name=f"Indicateurs_{selected_annee}")
+            weights_df.to_excel(writer, sheet_name=f"Poids_{selected_annee}", index=False)
         
         st.download_button(
-            label="📥 Télécharger le rapport complet",
+            label=f"📥 Télécharger le rapport {selected_annee}",
             data=output.getvalue(),
-            file_name="rapport_markowitz_bvmt_pro.xlsx",
+            file_name=f"rapport_markowitz_{selected_annee}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     except Exception as e:
