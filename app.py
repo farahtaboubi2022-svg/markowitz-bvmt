@@ -23,13 +23,19 @@ def load_excel_files(file_paths):
 
     for file_path in file_paths:
         file = Path(file_path)
+        
+        try:
+            # Lecture de la première feuille seulement pour accélérer
+            df = pd.read_excel(file)
+            df["Source"] = file.stem  # Utiliser stem pour éviter les doubles extensions
+            all_data.append(df)
+            st.sidebar.write(f"✅ Chargé : {file.stem}")
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ Erreur chargement {file.name}: {e}")
 
-        # Lecture de la première feuille seulement pour accélérer
-        df = pd.read_excel(file)
-
-        df["Source"] = file.name
-        all_data.append(df)
-
+    if not all_data:
+        return None
+    
     return pd.concat(all_data, ignore_index=True)
 
 
@@ -85,21 +91,46 @@ def prepare_data(data):
 
 BASE_DIR = Path(__file__).parent
 
-excel_files = sorted(
-    list(BASE_DIR.glob("*.xlsx")) +
-    list(BASE_DIR.glob("*.xls")) +
-    list(BASE_DIR.glob("*.xlsx.xlsx"))
-)
+# Liste propre des fichiers Excel sans doublons
+excel_extensions = ['*.xlsx', '*.xls']
+excel_files = []
+
+for ext in excel_extensions:
+    for file in BASE_DIR.glob(ext):
+        # Éviter les fichiers avec double extension .xlsx.xlsx
+        if not str(file).endswith('.xlsx.xlsx') and not str(file).endswith('.xls.xlsx'):
+            if file not in excel_files:
+                excel_files.append(file)
+
+# Trier par année si possible
+def extract_year(filename):
+    try:
+        # Extraire l'année du nom du fichier
+        name = filename.stem
+        # Chercher un nombre à 4 chiffres
+        import re
+        years = re.findall(r'\b(20\d{2})\b', name)
+        if years:
+            return int(years[0])
+        return 0
+    except:
+        return 0
+
+excel_files = sorted(excel_files, key=extract_year)
 
 if not excel_files:
     st.error("Aucun fichier Excel trouvé à côté de app.py.")
     st.write("Chemin recherché :", BASE_DIR)
+    st.write("Fichiers trouvés :", list(BASE_DIR.glob("*.xlsx")) + list(BASE_DIR.glob("*.xls")))
     st.stop()
 
 st.sidebar.success(f"{len(excel_files)} fichier(s) Excel détecté(s)")
 
 try:
-    data_raw = load_excel_files([str(f) for f in excel_files])
+    data_raw = load_excel_files(excel_files)
+    if data_raw is None:
+        st.error("Aucune donnée chargée depuis les fichiers Excel.")
+        st.stop()
 except Exception as e:
     st.error(f"Erreur lors du chargement Excel : {e}")
     st.stop()
@@ -110,9 +141,16 @@ if errors:
     st.error(f"Problème dans les données : {errors}")
     if columns_found:
         st.write("Colonnes trouvées :", columns_found)
+        st.write("Premières lignes des données :")
+        st.write(data_raw.head())
     st.stop()
 
 data, prices = prepared
+
+# Vérifier si prices est vide
+if prices.empty:
+    st.error("Aucune donnée de prix après traitement.")
+    st.stop()
 
 # ==============================
 # Infos sidebar
@@ -144,12 +182,21 @@ banques = [
     "WIFACK INT BANK"
 ]
 
+# Nettoyer les noms de colonnes
+prices.columns = prices.columns.str.strip()
+
 banques_valides = [b for b in banques if b in prices.columns]
 
 if len(banques_valides) < 2:
-    st.error("Moins de deux banques valides trouvées.")
-    st.write("Sociétés trouvées :", list(prices.columns))
-    st.stop()
+    st.warning(f"Moins de deux banques valides trouvées. Banques disponibles : {list(prices.columns)}")
+    # Utiliser toutes les sociétés disponibles comme fallback
+    banques_valides = list(prices.columns)
+    if len(banques_valides) < 2:
+        st.error("Toujours moins de deux sociétés disponibles.")
+        st.write("Sociétés trouvées :", list(prices.columns))
+        st.stop()
+    else:
+        st.info(f"Utilisation de toutes les sociétés disponibles : {banques_valides}")
 
 # ==============================
 # Paramètres
@@ -184,9 +231,15 @@ if len(selected_banques) < 2:
 # ==============================
 
 selected_prices = prices[selected_banques].dropna(how="all").ffill()
+
+# Vérifier qu'on a assez de données
+if len(selected_prices) < 2:
+    st.error("Pas assez de données de prix pour l'analyse.")
+    st.stop()
+
 returns = selected_prices.pct_change().dropna()
 
-if returns.empty:
+if returns.empty or len(returns) < 2:
     st.error("Pas assez de données pour calculer les rendements.")
     st.stop()
 
@@ -268,7 +321,9 @@ result_minvar = minimize(
 )
 
 if not result_sharpe.success or not result_minvar.success:
-    st.error("Erreur d’optimisation.")
+    st.error("Erreur d'optimisation.")
+    st.write("Erreur Sharpe:", result_sharpe.message)
+    st.write("Erreur MinVar:", result_minvar.message)
     st.stop()
 
 weights_sharpe = result_sharpe.x
@@ -276,11 +331,11 @@ weights_minvar = result_minvar.x
 
 ret_sharpe = port_return(weights_sharpe)
 vol_sharpe = port_vol(weights_sharpe)
-sharpe_ratio = (ret_sharpe - rf) / vol_sharpe
+sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
 
 ret_minvar = port_return(weights_minvar)
 vol_minvar = port_vol(weights_minvar)
-sharpe_minvar = (ret_minvar - rf) / vol_minvar
+sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
 
 weights_df = pd.DataFrame({
     "Banque": selected_banques,
@@ -309,11 +364,12 @@ ranking = ranking.sort_values("Score")
 best_bank = ranking.index[0]
 
 def recommendation(row):
-    if row["Sharpe individuel"] > 1 and row["Volatilité annualisée"] < metrics["Volatilité annualisée"].median():
+    median_vol = metrics["Volatilité annualisée"].median()
+    if row["Sharpe individuel"] > 1 and row["Volatilité annualisée"] < median_vol:
         return "Très attractive"
     elif row["Sharpe individuel"] > 0.5:
         return "Intéressante"
-    elif row["Volatilité annualisée"] > metrics["Volatilité annualisée"].median():
+    elif row["Volatilité annualisée"] > median_vol:
         return "Risque élevé"
     else:
         return "À surveiller"
@@ -420,7 +476,7 @@ with tab3:
     fig_roll.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_roll, use_container_width=True)
 
-    fig_corr = px.imshow(corr_matrix, text_auto=True, title="Heatmap de corrélation")
+    fig_corr = px.imshow(corr_matrix, text_auto=True, title="Heatmap de corrélation", aspect="auto")
     st.plotly_chart(fig_corr, use_container_width=True)
 
 with tab4:
@@ -480,12 +536,12 @@ with tab5:
     frontier_returns = []
     frontier_vols = []
 
-    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 60)
+    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 50)
 
     for target in target_returns:
         cons = (
             {"type": "eq", "fun": lambda w: np.sum(w) - 1},
-            {"type": "eq", "fun": lambda w, target=target: port_return(w) - target}
+            {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
         )
 
         result = minimize(
@@ -503,19 +559,21 @@ with tab5:
 
     fig_frontier = go.Figure()
 
-    fig_frontier.add_trace(go.Scatter(
-        x=frontier_vols,
-        y=frontier_returns,
-        mode="lines",
-        name="Frontière efficiente"
-    ))
+    if frontier_vols:
+        fig_frontier.add_trace(go.Scatter(
+            x=frontier_vols,
+            y=frontier_returns,
+            mode="lines",
+            name="Frontière efficiente",
+            line=dict(color="blue", width=2)
+        ))
 
     fig_frontier.add_trace(go.Scatter(
         x=[vol_sharpe],
         y=[ret_sharpe],
         mode="markers",
         name="Sharpe max",
-        marker=dict(size=14)
+        marker=dict(size=14, color="red")
     ))
 
     fig_frontier.add_trace(go.Scatter(
@@ -523,7 +581,7 @@ with tab5:
         y=[ret_minvar],
         mode="markers",
         name="Variance minimale",
-        marker=dict(size=14)
+        marker=dict(size=14, color="green")
     ))
 
     fig_frontier.update_layout(
@@ -576,16 +634,16 @@ with tab6:
 
     st.write("""
     Le modèle classe les banques selon la rentabilité, le risque, le Sharpe,
-    le drawdown, la VaR et l’Expected Shortfall.
+    le drawdown, la VaR et l'Expected Shortfall.
     """)
 
     st.warning(
-        "Avant d’investir réellement, il faut vérifier la liquidité, les frais, "
-        "la fiscalité, la réglementation et les conditions d’ouverture d’un compte titres."
+        "Avant d'investir réellement, il faut vérifier la liquidité, les frais, "
+        "la fiscalité, la réglementation et les conditions d'ouverture d'un compte titres."
     )
 
 with tab7:
-    st.subheader("💼 Simulation d’investissement")
+    st.subheader("💼 Simulation d'investissement")
 
     st.write(f"Capital simulé : **{capital:,.2f}**")
 
@@ -597,13 +655,18 @@ with tab7:
         use_container_width=True
     )
 
-    fig_invest1 = px.pie(
-        invest_sharpe,
-        names="Banque",
-        values="Montant Sharpe max",
-        title="Répartition du capital - Sharpe max"
-    )
-    st.plotly_chart(fig_invest1, use_container_width=True)
+    # Filtrer les montants nuls pour le graphique
+    invest_sharpe_nonzero = invest_sharpe[invest_sharpe["Montant Sharpe max"] > 0]
+    if not invest_sharpe_nonzero.empty:
+        fig_invest1 = px.pie(
+            invest_sharpe_nonzero,
+            names="Banque",
+            values="Montant Sharpe max",
+            title="Répartition du capital - Sharpe max"
+        )
+        st.plotly_chart(fig_invest1, use_container_width=True)
+    else:
+        st.info("Aucun montant positif pour le portefeuille Sharpe max")
 
     invest_minvar = weights_df[["Banque", "Montant variance minimale"]].copy()
 
@@ -613,13 +676,17 @@ with tab7:
         use_container_width=True
     )
 
-    fig_invest2 = px.pie(
-        invest_minvar,
-        names="Banque",
-        values="Montant variance minimale",
-        title="Répartition du capital - variance minimale"
-    )
-    st.plotly_chart(fig_invest2, use_container_width=True)
+    invest_minvar_nonzero = invest_minvar[invest_minvar["Montant variance minimale"] > 0]
+    if not invest_minvar_nonzero.empty:
+        fig_invest2 = px.pie(
+            invest_minvar_nonzero,
+            names="Banque",
+            values="Montant variance minimale",
+            title="Répartition du capital - variance minimale"
+        )
+        st.plotly_chart(fig_invest2, use_container_width=True)
+    else:
+        st.info("Aucun montant positif pour le portefeuille variance minimale")
 
     profile = st.selectbox(
         "Profil investisseur",
@@ -636,21 +703,24 @@ with tab7:
 with tab8:
     st.subheader("Télécharger le rapport Excel")
 
-    output = io.BytesIO()
+    try:
+        output = io.BytesIO()
 
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        selected_prices.to_excel(writer, sheet_name="Prix")
-        returns.to_excel(writer, sheet_name="Rendements")
-        cumulative_returns.to_excel(writer, sheet_name="Rendements cumules")
-        metrics.to_excel(writer, sheet_name="Indicateurs")
-        ranking.to_excel(writer, sheet_name="Recommandations")
-        cov_matrix.to_excel(writer, sheet_name="Covariance")
-        corr_matrix.to_excel(writer, sheet_name="Correlation")
-        weights_df.to_excel(writer, sheet_name="Poids", index=False)
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            selected_prices.to_excel(writer, sheet_name="Prix")
+            returns.to_excel(writer, sheet_name="Rendements")
+            cumulative_returns.to_excel(writer, sheet_name="Rendements cumules")
+            metrics.to_excel(writer, sheet_name="Indicateurs")
+            ranking.to_excel(writer, sheet_name="Recommandations")
+            cov_matrix.to_excel(writer, sheet_name="Covariance")
+            corr_matrix.to_excel(writer, sheet_name="Correlation")
+            weights_df.to_excel(writer, sheet_name="Poids", index=False)
 
-    st.download_button(
-        label="Télécharger le rapport complet",
-        data=output.getvalue(),
-        file_name="rapport_markowitz_bvmt_pro.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+        st.download_button(
+            label="Télécharger le rapport complet",
+            data=output.getvalue(),
+            file_name="rapport_markowitz_bvmt_pro.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    except Exception as e:
+        st.error(f"Erreur lors de la création du rapport Excel : {e}")
