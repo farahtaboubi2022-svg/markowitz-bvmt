@@ -1,5 +1,6 @@
 import io
 from pathlib import Path
+import re
 
 import streamlit as st
 import pandas as pd
@@ -29,7 +30,6 @@ def load_excel_files(file_paths):
             df = pd.read_excel(file)
             df["Source"] = file.stem  # Utiliser stem pour éviter les doubles extensions
             all_data.append(df)
-            st.sidebar.write(f"✅ Chargé : {file.stem}")
         except Exception as e:
             st.sidebar.warning(f"⚠️ Erreur chargement {file.name}: {e}")
 
@@ -97,7 +97,7 @@ excel_files = []
 
 for ext in excel_extensions:
     for file in BASE_DIR.glob(ext):
-        # Éviter les fichiers avec double extension .xlsx.xlsx
+        # Éviter les fichiers avec double extension
         if not str(file).endswith('.xlsx.xlsx') and not str(file).endswith('.xls.xlsx'):
             if file not in excel_files:
                 excel_files.append(file)
@@ -105,10 +105,7 @@ for ext in excel_extensions:
 # Trier par année si possible
 def extract_year(filename):
     try:
-        # Extraire l'année du nom du fichier
         name = filename.stem
-        # Chercher un nombre à 4 chiffres
-        import re
         years = re.findall(r'\b(20\d{2})\b', name)
         if years:
             return int(years[0])
@@ -121,7 +118,6 @@ excel_files = sorted(excel_files, key=extract_year)
 if not excel_files:
     st.error("Aucun fichier Excel trouvé à côté de app.py.")
     st.write("Chemin recherché :", BASE_DIR)
-    st.write("Fichiers trouvés :", list(BASE_DIR.glob("*.xlsx")) + list(BASE_DIR.glob("*.xls")))
     st.stop()
 
 st.sidebar.success(f"{len(excel_files)} fichier(s) Excel détecté(s)")
@@ -189,7 +185,6 @@ banques_valides = [b for b in banques if b in prices.columns]
 
 if len(banques_valides) < 2:
     st.warning(f"Moins de deux banques valides trouvées. Banques disponibles : {list(prices.columns)}")
-    # Utiliser toutes les sociétés disponibles comme fallback
     banques_valides = list(prices.columns)
     if len(banques_valides) < 2:
         st.error("Toujours moins de deux sociétés disponibles.")
@@ -408,20 +403,26 @@ with tab1:
     fig_cum.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_cum, use_container_width=True)
 
+    # Nettoyer les données pour le graphique scatter
     rr = metrics.reset_index().rename(columns={"index": "Banque"})
-
-    fig_rr = px.scatter(
-        rr,
-        x="Volatilité annualisée",
-        y="Rentabilité annualisée",
-        size="Sharpe individuel",
-        color="Sharpe individuel",
-        text="Banque",
-        title="Carte rendement / risque"
-    )
-    fig_rr.update_xaxes(tickformat=".0%")
-    fig_rr.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_rr, use_container_width=True)
+    # Supprimer les lignes avec des valeurs NaN ou inf dans les colonnes nécessaires
+    rr = rr.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
+    
+    if not rr.empty:
+        fig_rr = px.scatter(
+            rr,
+            x="Volatilité annualisée",
+            y="Rentabilité annualisée",
+            size="Sharpe individuel",
+            color="Sharpe individuel",
+            text="Banque",
+            title="Carte rendement / risque"
+        )
+        fig_rr.update_xaxes(tickformat=".0%")
+        fig_rr.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_rr, use_container_width=True)
+    else:
+        st.warning("Pas assez de données valides pour afficher la carte rendement/risque")
 
 with tab2:
     st.subheader("Tableau des indicateurs")
@@ -439,45 +440,76 @@ with tab2:
         use_container_width=True
     )
 
-    fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité annualisée")
-    fig_ret.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_ret, use_container_width=True)
+    # Vérifier que les données sont valides avant de créer les graphiques
+    if not metrics["Rentabilité annualisée"].dropna().empty:
+        fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité annualisée")
+        fig_ret.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_ret, use_container_width=True)
+    else:
+        st.info("Données de rentabilité non disponibles")
 
-    fig_vol = px.bar(metrics, y="Volatilité annualisée", title="Volatilité annualisée")
-    fig_vol.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_vol, use_container_width=True)
+    if not metrics["Volatilité annualisée"].dropna().empty:
+        fig_vol = px.bar(metrics, y="Volatilité annualisée", title="Volatilité annualisée")
+        fig_vol.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_vol, use_container_width=True)
+    else:
+        st.info("Données de volatilité non disponibles")
 
-    fig_sharpe = px.bar(metrics, y="Sharpe individuel", title="Ratio de Sharpe")
-    st.plotly_chart(fig_sharpe, use_container_width=True)
+    if not metrics["Sharpe individuel"].dropna().empty:
+        fig_sharpe = px.bar(metrics, y="Sharpe individuel", title="Ratio de Sharpe")
+        st.plotly_chart(fig_sharpe, use_container_width=True)
+    else:
+        st.info("Données de Sharpe non disponibles")
 
-    fig_beta = px.bar(metrics, y="Beta marché", title="Beta relatif au marché bancaire")
-    st.plotly_chart(fig_beta, use_container_width=True)
+    if not metrics["Beta marché"].dropna().empty:
+        fig_beta = px.bar(metrics, y="Beta marché", title="Beta relatif au marché bancaire")
+        st.plotly_chart(fig_beta, use_container_width=True)
+    else:
+        st.info("Données de Beta non disponibles")
 
 with tab3:
     st.subheader("Analyse des risques")
 
-    fig_drawdown = px.line(drawdown, title="Drawdown des banques sélectionnées")
-    fig_drawdown.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_drawdown, use_container_width=True)
+    if not drawdown.empty and not drawdown.isna().all().all():
+        fig_drawdown = px.line(drawdown, title="Drawdown des banques sélectionnées")
+        fig_drawdown.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_drawdown, use_container_width=True)
+    else:
+        st.info("Données de drawdown non disponibles")
 
-    fig_max_dd = px.bar(metrics, y="Max Drawdown", title="Max Drawdown par banque")
-    fig_max_dd.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_max_dd, use_container_width=True)
+    if not metrics["Max Drawdown"].dropna().empty:
+        fig_max_dd = px.bar(metrics, y="Max Drawdown", title="Max Drawdown par banque")
+        fig_max_dd.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_max_dd, use_container_width=True)
+    else:
+        st.info("Données de Max Drawdown non disponibles")
 
-    fig_var = px.bar(metrics, y="VaR 95%", title="Value at Risk 95%")
-    fig_var.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_var, use_container_width=True)
+    if not metrics["VaR 95%"].dropna().empty:
+        fig_var = px.bar(metrics, y="VaR 95%", title="Value at Risk 95%")
+        fig_var.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_var, use_container_width=True)
+    else:
+        st.info("Données VaR non disponibles")
 
-    fig_es = px.bar(metrics, y="Expected Shortfall", title="Expected Shortfall")
-    fig_es.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_es, use_container_width=True)
+    if not metrics["Expected Shortfall"].dropna().empty:
+        fig_es = px.bar(metrics, y="Expected Shortfall", title="Expected Shortfall")
+        fig_es.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_es, use_container_width=True)
+    else:
+        st.info("Données Expected Shortfall non disponibles")
 
-    fig_roll = px.line(rolling_vol, title="Volatilité glissante annualisée 30 jours")
-    fig_roll.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_roll, use_container_width=True)
+    if not rolling_vol.empty and not rolling_vol.isna().all().all():
+        fig_roll = px.line(rolling_vol, title="Volatilité glissante annualisée 30 jours")
+        fig_roll.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_roll, use_container_width=True)
+    else:
+        st.info("Données de volatilité glissante non disponibles")
 
-    fig_corr = px.imshow(corr_matrix, text_auto=True, title="Heatmap de corrélation", aspect="auto")
-    st.plotly_chart(fig_corr, use_container_width=True)
+    if not corr_matrix.empty:
+        fig_corr = px.imshow(corr_matrix, text_auto=True, title="Heatmap de corrélation", aspect="auto")
+        st.plotly_chart(fig_corr, use_container_width=True)
+    else:
+        st.info("Matrice de corrélation non disponible")
 
 with tab4:
     st.subheader("Portefeuille Sharpe maximum")
@@ -524,11 +556,17 @@ with tab4:
     fig_weights.update_yaxes(tickformat=".0%")
     st.plotly_chart(fig_weights, use_container_width=True)
 
-    fig_pie1 = px.pie(weights_df, names="Banque", values="Poids Sharpe max", title="Répartition portefeuille Sharpe max")
-    st.plotly_chart(fig_pie1, use_container_width=True)
+    if (weights_df["Poids Sharpe max"] > 0).any():
+        fig_pie1 = px.pie(weights_df, names="Banque", values="Poids Sharpe max", title="Répartition portefeuille Sharpe max")
+        st.plotly_chart(fig_pie1, use_container_width=True)
+    else:
+        st.info("Aucun poids positif pour le portefeuille Sharpe max")
 
-    fig_pie2 = px.pie(weights_df, names="Banque", values="Poids variance minimale", title="Répartition portefeuille variance minimale")
-    st.plotly_chart(fig_pie2, use_container_width=True)
+    if (weights_df["Poids variance minimale"] > 0).any():
+        fig_pie2 = px.pie(weights_df, names="Banque", values="Poids variance minimale", title="Répartition portefeuille variance minimale")
+        st.plotly_chart(fig_pie2, use_container_width=True)
+    else:
+        st.info("Aucun poids positif pour le portefeuille variance minimale")
 
 with tab5:
     st.subheader("Frontière efficiente")
@@ -536,7 +574,7 @@ with tab5:
     frontier_returns = []
     frontier_vols = []
 
-    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 50)
+    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 30)
 
     for target in target_returns:
         cons = (
@@ -616,21 +654,31 @@ with tab6:
         use_container_width=True
     )
 
-    fig_score = px.bar(ranking, y="Score", color="Recommandation", title="Classement intelligent des banques")
-    st.plotly_chart(fig_score, use_container_width=True)
+    if not ranking.empty:
+        fig_score = px.bar(ranking, y="Score", color="Recommandation", title="Classement intelligent des banques")
+        st.plotly_chart(fig_score, use_container_width=True)
+    else:
+        st.info("Données de classement non disponibles")
 
-    fig_reco = px.scatter(
-        ranking.reset_index().rename(columns={"index": "Banque"}),
-        x="Volatilité annualisée",
-        y="Rentabilité annualisée",
-        color="Recommandation",
-        size="Sharpe individuel",
-        text="Banque",
-        title="Carte de recommandation"
-    )
-    fig_reco.update_xaxes(tickformat=".0%")
-    fig_reco.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_reco, use_container_width=True)
+    # Nettoyer les données pour le graphique de recommandation
+    ranking_clean = ranking.reset_index().rename(columns={"index": "Banque"})
+    ranking_clean = ranking_clean.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
+    
+    if not ranking_clean.empty:
+        fig_reco = px.scatter(
+            ranking_clean,
+            x="Volatilité annualisée",
+            y="Rentabilité annualisée",
+            color="Recommandation",
+            size="Sharpe individuel",
+            text="Banque",
+            title="Carte de recommandation"
+        )
+        fig_reco.update_xaxes(tickformat=".0%")
+        fig_reco.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_reco, use_container_width=True)
+    else:
+        st.info("Pas assez de données valides pour afficher la carte de recommandation")
 
     st.write("""
     Le modèle classe les banques selon la rentabilité, le risque, le Sharpe,
@@ -655,7 +703,6 @@ with tab7:
         use_container_width=True
     )
 
-    # Filtrer les montants nuls pour le graphique
     invest_sharpe_nonzero = invest_sharpe[invest_sharpe["Montant Sharpe max"] > 0]
     if not invest_sharpe_nonzero.empty:
         fig_invest1 = px.pie(
