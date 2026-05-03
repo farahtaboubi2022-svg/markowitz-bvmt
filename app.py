@@ -101,7 +101,8 @@ def convert_numpy_types(obj):
     elif isinstance(obj, pd.Series):
         return obj.apply(convert_numpy_types)
     elif isinstance(obj, pd.DataFrame):
-        return obj.applymap(convert_numpy_types)
+        # Remplacer applymap par map pour chaque colonne (pandas 2.1+)
+        return obj.apply(lambda col: col.map(convert_numpy_types) if col.dtype == 'object' else col)
     elif isinstance(obj, dict):
         return {k: convert_numpy_types(v) for k, v in obj.items()}
     elif isinstance(obj, (list, tuple)):
@@ -152,8 +153,10 @@ try:
         st.error("Aucune donnée chargée depuis les fichiers Excel.")
         st.stop()
     
-    # Convertir les types numpy
-    data_raw = convert_numpy_types(data_raw)
+    # Convertir les types numpy (uniquement pour les colonnes objet)
+    for col in data_raw.columns:
+        if data_raw[col].dtype == 'object':
+            data_raw[col] = data_raw[col].apply(lambda x: int(x) if isinstance(x, (np.integer, np.int64, np.int32)) else x)
     
 except Exception as e:
     st.error(f"Erreur lors du chargement Excel : {e}")
@@ -170,10 +173,6 @@ if errors:
     st.stop()
 
 data, prices = prepared
-
-# Convertir les types numpy dans les données traitées
-data = convert_numpy_types(data)
-prices = convert_numpy_types(prices)
 
 # Vérifier si prices est vide
 if prices.empty:
@@ -295,10 +294,6 @@ try:
         beta[col] = cov / var if var != 0 else np.nan
     
     beta = pd.Series(beta)
-    
-    # Convertir les résultats en types Python natifs
-    mean_returns = convert_numpy_types(mean_returns)
-    volatility = convert_numpy_types(volatility)
     
     metrics = pd.DataFrame({
         "Rentabilité annualisée": mean_returns,
@@ -454,7 +449,6 @@ with tab1:
     
     # Nettoyer les données pour le graphique scatter
     rr = metrics.reset_index().rename(columns={"index": "Banque"})
-    rr = convert_numpy_types(rr)
     rr = rr.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
     
     if not rr.empty and len(rr) > 1:
@@ -664,8 +658,6 @@ with tab5:
     except Exception as e:
         st.warning(f"Erreur lors du calcul de la frontière efficiente : {e}")
 
-# ... (la suite reste identique)
-
 with tab6:
     st.subheader("🤖 Recommandations intelligentes")
     
@@ -694,7 +686,6 @@ with tab6:
         
         # Carte de recommandation
         ranking_clean = ranking.reset_index().rename(columns={"index": "Banque"})
-        ranking_clean = convert_numpy_types(ranking_clean)
         ranking_clean = ranking_clean.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
         
         if not ranking_clean.empty and len(ranking_clean) > 1:
