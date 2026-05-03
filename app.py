@@ -28,15 +28,15 @@ def load_excel_files(file_paths):
         file = Path(file_path)
         
         try:
-            # Afficher le fichier en cours de chargement
             st.sidebar.write(f"📂 Chargement: {file.name}")
             
             # Lecture de la première feuille
             df = pd.read_excel(file)
-            df["Source"] = file.stem  # Utiliser stem pour le nom du fichier
+            df["Source"] = file.stem
+            df["Fichier_Annee"] = file.stem  # Garder l'année du fichier
             all_data.append(df)
             
-            st.sidebar.write(f"   ✅ {len(df)} lignes chargées")
+            st.sidebar.write(f"   ✅ {len(df)} lignes, {df.columns.tolist()[:5]}...")
             
         except Exception as e:
             st.sidebar.warning(f"⚠️ Erreur {file.name}: {e}")
@@ -99,32 +99,30 @@ def prepare_data(data):
 
 
 # ==============================
-# Chargement fichiers Excel
+# Chargement fichiers Excel - DIAGNOSTIC
 # ==============================
 
 BASE_DIR = Path(__file__).parent
 
-# Afficher le chemin de recherche
-st.sidebar.write("🔍 Recherche dans:", BASE_DIR)
+st.sidebar.write("🔍 **DIAGNOSTIC DE CHARGEMENT**")
+st.sidebar.write(f"Chemin: {BASE_DIR}")
 
-# Liste tous les fichiers Excel du dossier
-all_excel_files = []
-for pattern in ['*.xlsx', '*.xls']:
-    all_excel_files.extend(BASE_DIR.glob(pattern))
+# Lister TOUS les fichiers dans le dossier
+all_files = list(BASE_DIR.iterdir())
+st.sidebar.write(f"📁 Total fichiers dans dossier: {len(all_files)}")
 
-# Filtrer pour éviter les doublons et fichiers temporaires
+# Afficher tous les fichiers
+st.sidebar.write("📄 Tous les fichiers:")
+for f in all_files:
+    st.sidebar.write(f"   - {f.name} (est fichier: {f.is_file()})")
+
+# Chercher spécifiquement les fichiers Excel
 excel_files = []
-for file in all_excel_files:
-    filename = str(file.name).lower()
-    # Ignorer les fichiers temporaires et doublons
-    if not filename.startswith('~') and not filename.startswith('.'):
-        if file not in excel_files:
+for file in all_files:
+    if file.is_file():
+        if file.suffix.lower() in ['.xlsx', '.xls']:
             excel_files.append(file)
-
-# Afficher tous les fichiers trouvés
-st.sidebar.write("📁 Fichiers trouvés:")
-for f in excel_files:
-    st.sidebar.write(f"   - {f.name}")
+            st.sidebar.write(f"   ✅ EXCEL trouvé: {file.name}")
 
 # Fonction pour extraire l'année du nom du fichier
 def extract_year_from_filename(filename):
@@ -140,13 +138,15 @@ def extract_year_from_filename(filename):
 # Trier par année
 excel_files = sorted(excel_files, key=extract_year_from_filename)
 
-if not excel_files:
-    st.error("Aucun fichier Excel trouvé dans le dossier.")
-    st.write("Chemin recherché :", BASE_DIR)
-    st.write("Fichiers dans le dossier:", list(BASE_DIR.iterdir()))
-    st.stop()
+st.sidebar.write(f"\n📊 **Fichiers Excel trouvés: {len(excel_files)}**")
+for f in excel_files:
+    annee = extract_year_from_filename(f)
+    st.sidebar.write(f"   - {f.name} (année détectée: {annee})")
 
-st.sidebar.success(f"📊 {len(excel_files)} fichier(s) Excel détecté(s)")
+if not excel_files:
+    st.error("Aucun fichier Excel trouvé dans le dossier!")
+    st.write("Contenu du dossier:", list(BASE_DIR.iterdir()))
+    st.stop()
 
 # Charger TOUS les fichiers
 try:
@@ -158,6 +158,11 @@ try:
 except Exception as e:
     st.error(f"Erreur lors du chargement Excel : {e}")
     st.stop()
+
+st.sidebar.write("\n📊 **Après chargement:**")
+st.sidebar.write(f"Colonnes dans data_raw: {data_raw.columns.tolist()}")
+st.sidebar.write(f"Premières lignes de data_raw:")
+st.sidebar.dataframe(data_raw.head(3))
 
 # Préparer les données
 prepared, errors, columns_found = prepare_data(data_raw)
@@ -178,22 +183,48 @@ if prices.empty:
     st.stop()
 
 # ==============================
-# Infos sidebar - Afficher TOUTES les années
+# DIAGNOSTIC DES ANNÉES
 # ==============================
 
-st.sidebar.write("📅 Période détectée")
-st.sidebar.write(data["Date"].min(), "→", data["Date"].max())
+st.sidebar.write("\n📅 **DIAGNOSTIC DES DATES**")
 
-# Récupérer les années disponibles et les convertir en int Python
+# Afficher les dates uniques
+dates_uniques = sorted(data["Date"].dropna().unique())
+st.sidebar.write(f"Dates dans les données: {len(dates_uniques)} dates")
+if dates_uniques:
+    st.sidebar.write(f"Première date: {dates_uniques[0]}")
+    st.sidebar.write(f"Dernière date: {dates_uniques[-1]}")
+
+# Récupérer les années disponibles
+data["Année"] = data["Date"].dt.year
 annees_disponibles = sorted([int(a) for a in data["Année"].dropna().unique()])
-st.sidebar.write("📊 Années disponibles dans les données")
-st.sidebar.write(annees_disponibles)
+
+st.sidebar.write(f"\n📊 **Années trouvées dans les données: {annees_disponibles}**")
 
 # Afficher le nombre de lignes par année
 st.sidebar.write("📈 Lignes par année:")
 for annee in annees_disponibles:
     nb_lignes = len(data[data["Année"] == annee])
     st.sidebar.write(f"   {annee}: {nb_lignes} lignes")
+    # Afficher les sociétés pour cette année
+    societes_annee = data[data["Année"] == annee]["Societe"].unique()
+    st.sidebar.write(f"      Sociétés: {len(societes_annee)} sociétés")
+    if len(societes_annee) <= 5:
+        st.sidebar.write(f"      {list(societes_annee)}")
+
+# Si une seule année est trouvée, afficher un avertissement
+if len(annees_disponibles) == 1:
+    st.warning(f"⚠️ Une seule année trouvée dans les données: {annees_disponibles[0]}")
+    st.info("Vérifiez que tous vos fichiers Excel contiennent des dates valides dans la colonne 'SEANCE'")
+    
+    # Afficher un aperçu des données brutes
+    st.subheader("Aperçu des données chargées:")
+    st.dataframe(data_raw.head(20))
+    
+    # Vérifier les sources
+    if "Source" in data_raw.columns:
+        st.subheader("Fichiers sources chargés:")
+        st.write(data_raw["Source"].value_counts())
 
 # ==============================
 # Sélection de la période (année)
@@ -201,12 +232,16 @@ for annee in annees_disponibles:
 
 st.sidebar.header("📅 Sélection de la période")
 
+if len(annees_disponibles) == 0:
+    st.error("Aucune année détectée dans les données!")
+    st.stop()
+
 # Convertir les années en liste de strings pour l'affichage
 options_annees = [str(a) for a in annees_disponibles]
 selected_annee_str = st.sidebar.selectbox(
     "Choisir l'année à analyser",
     options=options_annees,
-    index=len(options_annees)-1 if options_annees else 0  # Dernière année par défaut
+    index=len(options_annees)-1 if options_annees else 0
 )
 
 # Convertir la sélection en entier
@@ -220,6 +255,8 @@ data_filtered = data[data["Année"] == selected_annee].copy()
 if data_filtered.empty:
     st.error(f"Aucune donnée trouvée pour l'année {selected_annee}")
     st.stop()
+
+st.sidebar.success(f"✅ {len(data_filtered)} lignes pour l'année {selected_annee}")
 
 # Recréer les prix pour l'année sélectionnée
 prices_filtered = data_filtered.pivot_table(
@@ -235,8 +272,8 @@ prices_filtered = data_filtered.pivot_table(
 
 # Afficher les sociétés disponibles pour l'année sélectionnée
 societes_disponibles = sorted(prices_filtered.columns.tolist())
-st.sidebar.write(f"🏦 Sociétés disponibles en {selected_annee}:")
-for s in societes_disponibles[:10]:  # Limiter l'affichage
+st.sidebar.write(f"\n🏦 **Sociétés disponibles en {selected_annee}:**")
+for s in societes_disponibles[:10]:
     st.sidebar.write(f"   - {s}")
 if len(societes_disponibles) > 10:
     st.sidebar.write(f"   ... et {len(societes_disponibles)-10} autres")
@@ -264,10 +301,10 @@ prices_filtered.columns = prices_filtered.columns.str.strip()
 # Trouver les banques présentes dans les données pour l'année sélectionnée
 banques_valides = []
 for b in banques:
-    # Recherche exacte et insensible à la casse
     matching_cols = [col for col in prices_filtered.columns if col.upper() == b.upper()]
     if matching_cols:
         banques_valides.append(matching_cols[0])
+        st.sidebar.write(f"   ✅ Trouvé: {matching_cols[0]}")
 
 # Si aucune banque trouvée, utiliser toutes les sociétés
 if len(banques_valides) < 2:
@@ -285,7 +322,6 @@ if len(banques_valides) < 2:
 
 st.sidebar.header("⚙️ Paramètres d'analyse")
 
-# Sélection des banques à analyser
 selected_banques = st.sidebar.multiselect(
     f"Choisir les banques/sociétés à analyser ({selected_annee})",
     options=banques_valides,
@@ -309,13 +345,12 @@ if len(selected_banques) < 2:
     st.stop()
 
 # ==============================
-# Calculs financiers pour l'année sélectionnée
+# Suite de l'analyse (calculs, optimisation, etc.)
 # ==============================
 
 try:
     selected_prices = prices_filtered[selected_banques].dropna(how="all").ffill()
     
-    # Vérifier qu'on a assez de données
     if len(selected_prices) < 2:
         st.error(f"Pas assez de données de prix pour l'année {selected_annee}.")
         st.stop()
@@ -326,40 +361,19 @@ try:
         st.error(f"Pas assez de données pour calculer les rendements en {selected_annee}.")
         st.stop()
     
-    # Pour une analyse annuelle, on utilise les données quotidiennes
-    # Annualisation: 252 jours de bourse
     mean_returns = returns.mean() * 252
     volatility = returns.std() * np.sqrt(252)
     cov_matrix = returns.cov() * 252
     corr_matrix = returns.corr()
     
     cumulative_returns = (1 + returns).cumprod() - 1
-    rolling_vol = returns.rolling(20).std() * np.sqrt(252)  # 20 jours pour l'année
-    
     drawdown = selected_prices / selected_prices.cummax() - 1
     max_drawdown = drawdown.min()
-    
-    var_95 = returns.quantile(0.05) * np.sqrt(252)
-    expected_shortfall = returns[returns.le(returns.quantile(0.05))].mean() * np.sqrt(252)
-    
-    market_return = returns.mean(axis=1)
-    
-    beta = {}
-    for col in returns.columns:
-        cov = np.cov(returns[col], market_return)[0][1] if len(market_return) > 1 else 0
-        var = np.var(market_return) if len(market_return) > 1 else 1
-        beta[col] = cov / var if var != 0 else np.nan
-    
-    beta = pd.Series(beta)
     
     metrics = pd.DataFrame({
         "Rentabilité annualisée": mean_returns,
         "Volatilité annualisée": volatility,
-        "Sharpe individuel": (mean_returns - rf) / volatility,
-        "Max Drawdown": max_drawdown,
-        "VaR 95%": var_95,
-        "Expected Shortfall": expected_shortfall,
-        "Beta marché": beta
+        "Sharpe individuel": (mean_returns - rf) / volatility
     })
     
     metrics = metrics.replace([np.inf, -np.inf], np.nan).dropna()
@@ -368,10 +382,7 @@ except Exception as e:
     st.error(f"Erreur lors des calculs financiers : {e}")
     st.stop()
 
-# ==============================
-# Optimisation Markowitz
-# ==============================
-
+# Optimisation
 n = len(selected_banques)
 init = np.ones(n) / n
 
@@ -387,84 +398,20 @@ def neg_sharpe(w):
         return 999
     return -(port_return(w) - rf) / vol
 
-def min_vol(w):
-    return port_vol(w)
-
 constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
 bounds = tuple((0, 1) for _ in range(n))
 
-try:
-    result_sharpe = minimize(
-        neg_sharpe,
-        init,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints
-    )
-    
-    result_minvar = minimize(
-        min_vol,
-        init,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints
-    )
-    
-    weights_sharpe = result_sharpe.x
-    weights_minvar = result_minvar.x
-    
-    ret_sharpe = port_return(weights_sharpe)
-    vol_sharpe = port_vol(weights_sharpe)
-    sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
-    
-    ret_minvar = port_return(weights_minvar)
-    vol_minvar = port_vol(weights_minvar)
-    sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
-    
-    weights_df = pd.DataFrame({
-        "Banque": selected_banques,
-        "Poids Sharpe max": weights_sharpe,
-        "Montant Sharpe max": weights_sharpe * capital,
-        "Poids variance minimale": weights_minvar,
-        "Montant variance minimale": weights_minvar * capital
-    })
-    
-except Exception as e:
-    st.error(f"Erreur lors de l'optimisation : {e}")
-    st.stop()
+result_sharpe = minimize(neg_sharpe, init, method="SLSQP", bounds=bounds, constraints=constraints)
+weights_sharpe = result_sharpe.x
+ret_sharpe = port_return(weights_sharpe)
+vol_sharpe = port_vol(weights_sharpe)
+sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
 
-# ==============================
-# Recommandations
-# ==============================
-
-ranking = metrics.copy()
-
-if not ranking.empty:
-    ranking["Score"] = (
-        ranking["Sharpe individuel"].rank(ascending=False) +
-        ranking["Rentabilité annualisée"].rank(ascending=False) +
-        ranking["Volatilité annualisée"].rank(ascending=True) +
-        ranking["Max Drawdown"].rank(ascending=False) +
-        ranking["VaR 95%"].rank(ascending=False)
-    )
-    
-    ranking = ranking.sort_values("Score")
-    best_bank = ranking.index[0]
-    
-    def recommendation(row):
-        median_vol = metrics["Volatilité annualisée"].median()
-        if row["Sharpe individuel"] > 1 and row["Volatilité annualisée"] < median_vol:
-            return "Très attractive"
-        elif row["Sharpe individuel"] > 0.5:
-            return "Intéressante"
-        elif row["Volatilité annualisée"] > median_vol:
-            return "Risque élevé"
-        else:
-            return "À surveiller"
-    
-    ranking["Recommandation"] = ranking.apply(recommendation, axis=1)
-else:
-    best_bank = "N/A"
+weights_df = pd.DataFrame({
+    "Banque": selected_banques,
+    "Poids Sharpe max": weights_sharpe,
+    "Montant Sharpe max": weights_sharpe * capital
+})
 
 # ==============================
 # Interface principale
@@ -472,215 +419,46 @@ else:
 
 st.header(f"📊 Analyse pour l'année {selected_annee}")
 
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-    "📊 Vue générale",
-    "📈 Indicateurs",
-    "⚠️ Risques",
-    "🎯 Optimisation",
-    "📉 Frontière efficiente",
-    "🤖 Recommandations",
-    "💼 Simulation",
-    "📥 Export"
-])
+# Afficher les statistiques
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Nombre de sociétés", len(selected_banques))
+col2.metric("Sharpe max", f"{sharpe_ratio:.4f}")
+col3.metric("Capital simulé", f"{capital:,.0f} TND")
+col4.metric("Année analysée", selected_annee)
 
-with tab1:
-    st.subheader(f"Résumé global - Année {selected_annee}")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Nombre de sociétés", len(selected_banques))
-    col2.metric("Meilleure société", str(best_bank))
-    col3.metric("Sharpe max", f"{float(sharpe_ratio):.4f}")
-    col4.metric("Capital simulé", f"{float(capital):,.0f} TND")
-    
-    # Graphique des cours
-    if not selected_prices.empty:
-        fig_prices = px.line(selected_prices, title=f"Évolution des cours de clôture - {selected_annee}")
-        fig_prices.update_layout(xaxis_title="Date", yaxis_title="Cours (TND)")
-        st.plotly_chart(fig_prices, use_container_width=True)
-    
-    # Graphique des rendements cumulés
-    if not cumulative_returns.empty:
-        fig_cum = px.line(cumulative_returns, title=f"Rentabilité cumulée - {selected_annee}")
-        fig_cum.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_cum, use_container_width=True)
+# Graphique des cours
+fig_prices = px.line(selected_prices, title=f"Évolution des cours - {selected_annee}")
+st.plotly_chart(fig_prices, use_container_width=True)
 
-with tab2:
-    st.subheader(f"Tableau des indicateurs - {selected_annee}")
-    
-    if not metrics.empty:
-        st.dataframe(
-            metrics.style.format({
-                "Rentabilité annualisée": "{:.2%}",
-                "Volatilité annualisée": "{:.2%}",
-                "Sharpe individuel": "{:.4f}",
-                "Max Drawdown": "{:.2%}",
-                "VaR 95%": "{:.2%}",
-                "Expected Shortfall": "{:.2%}",
-                "Beta marché": "{:.4f}"
-            }),
-            use_container_width=True
-        )
-    
-    # Graphiques
-    if not metrics["Rentabilité annualisée"].dropna().empty:
-        fig_ret = px.bar(metrics, y="Rentabilité annualisée", title=f"Rentabilité annualisée - {selected_annee}")
-        fig_ret.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_ret, use_container_width=True)
-    
-    if not metrics["Volatilité annualisée"].dropna().empty:
-        fig_vol = px.bar(metrics, y="Volatilité annualisée", title=f"Volatilité annualisée - {selected_annee}")
-        fig_vol.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_vol, use_container_width=True)
+# Tableau des métriques
+st.subheader("Indicateurs")
+st.dataframe(metrics.style.format({
+    "Rentabilité annualisée": "{:.2%}",
+    "Volatilité annualisée": "{:.2%}",
+    "Sharpe individuel": "{:.4f}"
+}))
 
-with tab3:
-    st.subheader(f"Analyse des risques - {selected_annee}")
-    
-    if not drawdown.empty and not drawdown.isna().all().all():
-        fig_drawdown = px.line(drawdown, title=f"Drawdown des sociétés - {selected_annee}")
-        fig_drawdown.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_drawdown, use_container_width=True)
-    
-    if not corr_matrix.empty:
-        fig_corr = px.imshow(corr_matrix, text_auto=True, title=f"Matrice de corrélation - {selected_annee}", aspect="auto")
-        st.plotly_chart(fig_corr, use_container_width=True)
+# Poids du portefeuille
+st.subheader("Portefeuille optimal - Sharpe maximum")
+st.dataframe(weights_df.style.format({
+    "Poids Sharpe max": "{:.2%}",
+    "Montant Sharpe max": "{:,.2f}"
+}))
 
-with tab4:
-    st.subheader(f"Portefeuille Sharpe maximum - {selected_annee}")
+# Téléchargement du rapport
+try:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        selected_prices.to_excel(writer, sheet_name=f"Prix_{selected_annee}")
+        returns.to_excel(writer, sheet_name=f"Rendements_{selected_annee}")
+        metrics.to_excel(writer, sheet_name=f"Indicateurs_{selected_annee}")
+        weights_df.to_excel(writer, sheet_name=f"Poids_{selected_annee}", index=False)
     
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Rentabilité", f"{float(ret_sharpe):.2%}")
-    c2.metric("Risque", f"{float(vol_sharpe):.2%}")
-    c3.metric("Sharpe", f"{float(sharpe_ratio):.4f}")
-    
-    st.subheader(f"Portefeuille variance minimale - {selected_annee}")
-    
-    c4, c5, c6 = st.columns(3)
-    c4.metric("Rentabilité", f"{float(ret_minvar):.2%}")
-    c5.metric("Risque", f"{float(vol_minvar):.2%}")
-    c6.metric("Sharpe", f"{float(sharpe_minvar):.4f}")
-    
-    st.subheader("Poids et montants à investir")
-    
-    if not weights_df.empty:
-        st.dataframe(
-            weights_df.style.format({
-                "Poids Sharpe max": "{:.2%}",
-                "Montant Sharpe max": "{:,.2f}",
-                "Poids variance minimale": "{:.2%}",
-                "Montant variance minimale": "{:,.2f}"
-            }),
-            use_container_width=True
-        )
-
-with tab5:
-    st.subheader(f"Frontière efficiente - {selected_annee}")
-    
-    frontier_returns = []
-    frontier_vols = []
-    
-    try:
-        target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 30)
-        
-        for target in target_returns:
-            cons = (
-                {"type": "eq", "fun": lambda w: np.sum(w) - 1},
-                {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
-            )
-            
-            result = minimize(
-                min_vol,
-                init,
-                method="SLSQP",
-                bounds=bounds,
-                constraints=cons
-            )
-            
-            if result.success:
-                w = result.x
-                frontier_returns.append(float(port_return(w)))
-                frontier_vols.append(float(port_vol(w)))
-        
-        fig_frontier = go.Figure()
-        
-        if frontier_vols:
-            fig_frontier.add_trace(go.Scatter(
-                x=frontier_vols,
-                y=frontier_returns,
-                mode="lines",
-                name="Frontière efficiente",
-                line=dict(color="blue", width=2)
-            ))
-        
-        fig_frontier.add_trace(go.Scatter(
-            x=[float(vol_sharpe)],
-            y=[float(ret_sharpe)],
-            mode="markers",
-            name="Sharpe max",
-            marker=dict(size=14, color="red")
-        ))
-        
-        fig_frontier.add_trace(go.Scatter(
-            x=[float(vol_minvar)],
-            y=[float(ret_minvar)],
-            mode="markers",
-            name="Variance minimale",
-            marker=dict(size=14, color="green")
-        ))
-        
-        fig_frontier.update_layout(
-            title=f"Frontière efficiente de Markowitz - {selected_annee}",
-            xaxis_title="Risque / Volatilité",
-            yaxis_title="Rentabilité"
-        )
-        
-        fig_frontier.update_xaxes(tickformat=".0%")
-        fig_frontier.update_yaxes(tickformat=".0%")
-        
-        st.plotly_chart(fig_frontier, use_container_width=True)
-        
-    except Exception as e:
-        st.warning(f"Erreur lors du calcul de la frontière efficiente : {e}")
-
-with tab6:
-    st.subheader(f"🤖 Recommandations intelligentes - {selected_annee}")
-    st.info("Cette analyse est indicative et ne constitue pas un conseil financier personnalisé.")
-    
-    if not ranking.empty:
-        st.success(f"🏆 Meilleure société selon le modèle : {best_bank}")
-        st.dataframe(ranking, use_container_width=True)
-
-with tab7:
-    st.subheader(f"💼 Simulation d'investissement - {selected_annee}")
-    st.write(f"Capital simulé : **{capital:,.2f} TND**")
-    
-    if not weights_df.empty:
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("Portefeuille Sharpe max")
-            st.dataframe(weights_df[["Banque", "Montant Sharpe max"]], use_container_width=True)
-        
-        with col2:
-            st.subheader("Portefeuille Variance min")
-            st.dataframe(weights_df[["Banque", "Montant variance minimale"]], use_container_width=True)
-
-with tab8:
-    st.subheader(f"Télécharger le rapport Excel - {selected_annee}")
-    
-    try:
-        output = io.BytesIO()
-        
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            selected_prices.to_excel(writer, sheet_name=f"Prix_{selected_annee}")
-            returns.to_excel(writer, sheet_name=f"Rendements_{selected_annee}")
-            metrics.to_excel(writer, sheet_name=f"Indicateurs_{selected_annee}")
-            weights_df.to_excel(writer, sheet_name=f"Poids_{selected_annee}", index=False)
-        
-        st.download_button(
-            label=f"📥 Télécharger le rapport {selected_annee}",
-            data=output.getvalue(),
-            file_name=f"rapport_markowitz_{selected_annee}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    except Exception as e:
-        st.error(f"Erreur lors de la création du rapport : {e}")
+    st.download_button(
+        label=f"📥 Télécharger le rapport {selected_annee}",
+        data=output.getvalue(),
+        file_name=f"rapport_markowitz_{selected_annee}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+except Exception as e:
+    st.error(f"Erreur création rapport: {e}")
