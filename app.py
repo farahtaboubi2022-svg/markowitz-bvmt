@@ -226,6 +226,11 @@ capital = st.sidebar.number_input("Capital (TND)", value=10000, step=1000)
 selected_prices = prices_filtered[selected_societies].dropna(how="all").ffill()
 returns = selected_prices.pct_change().dropna()
 
+# Vérifier qu'on a assez de données
+if returns.empty or len(returns) < 5:
+    st.error("Pas assez de données de rendements pour l'analyse")
+    st.stop()
+
 # Annualisation
 mean_returns = returns.mean() * 252
 volatility = returns.std() * np.sqrt(252)
@@ -250,9 +255,12 @@ expected_shortfall_95 = returns[returns.le(returns.quantile(0.05))].mean() * np.
 market_return = returns.mean(axis=1)
 beta = {}
 for col in returns.columns:
-    cov = np.cov(returns[col], market_return)[0][1] if len(market_return) > 1 else 0
-    var = np.var(market_return) if len(market_return) > 1 else 1
-    beta[col] = cov / var if var != 0 else np.nan
+    if len(market_return) > 1:
+        cov = np.cov(returns[col], market_return)[0][1]
+        var = np.var(market_return)
+        beta[col] = cov / var if var != 0 else np.nan
+    else:
+        beta[col] = np.nan
 beta = pd.Series(beta)
 
 # Métriques individuelles
@@ -284,7 +292,7 @@ def port_vol(w):
 
 def neg_sharpe(w):
     vol = port_vol(w)
-    if vol == 0:
+    if vol == 0 or np.isnan(vol):
         return 999
     return -(port_return(w) - rf) / vol
 
@@ -295,61 +303,78 @@ constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
 bounds = tuple((0, 1) for _ in range(n))
 
 # Portefeuille Sharpe max
-result_sharpe = minimize(neg_sharpe, init, method="SLSQP", bounds=bounds, constraints=constraints)
+try:
+    result_sharpe = minimize(neg_sharpe, init, method="SLSQP", bounds=bounds, constraints=constraints)
+    result_sharpe_success = result_sharpe.success
+except:
+    result_sharpe_success = False
+    weights_sharpe = init
+    ret_sharpe = port_return(init)
+    vol_sharpe = port_vol(init)
+    sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
 
 # Portefeuille variance minimale
-result_minvar = minimize(min_vol, init, method="SLSQP", bounds=bounds, constraints=constraints)
+try:
+    result_minvar = minimize(min_vol, init, method="SLSQP", bounds=bounds, constraints=constraints)
+    result_minvar_success = result_minvar.success
+except:
+    result_minvar_success = False
+    weights_minvar = init
+    ret_minvar = port_return(init)
+    vol_minvar = port_vol(init)
+    sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
 
-if result_sharpe.success and result_minvar.success:
+if result_sharpe_success:
     weights_sharpe = result_sharpe.x
-    weights_minvar = result_minvar.x
-    
     ret_sharpe = port_return(weights_sharpe)
     vol_sharpe = port_vol(weights_sharpe)
     sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
-    
+
+if result_minvar_success:
+    weights_minvar = result_minvar.x
     ret_minvar = port_return(weights_minvar)
     vol_minvar = port_vol(weights_minvar)
     sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
-    
-    weights_df = pd.DataFrame({
-        "Société": selected_societies,
-        "Poids Sharpe max": weights_sharpe,
-        "Montant Sharpe max (TND)": weights_sharpe * capital,
-        "Poids variance min": weights_minvar,
-        "Montant variance min (TND)": weights_minvar * capital
-    })
-else:
-    st.error("Erreur d'optimisation")
-    st.stop()
+
+weights_df = pd.DataFrame({
+    "Société": selected_societies,
+    "Poids Sharpe max": weights_sharpe,
+    "Montant Sharpe max (TND)": weights_sharpe * capital,
+    "Poids variance min": weights_minvar,
+    "Montant variance min (TND)": weights_minvar * capital
+})
 
 # ==============================
 # Classement intelligent
 # ==============================
 
-ranking = metrics.copy()
-ranking["Score"] = (
-    ranking["Sharpe individuel"].rank(ascending=False) +
-    ranking["Rentabilité annualisée"].rank(ascending=False) +
-    ranking["Volatilité annualisée"].rank(ascending=True) +
-    ranking["Max Drawdown"].rank(ascending=False) +
-    ranking["VaR 95%"].rank(ascending=False)
-)
-ranking = ranking.sort_values("Score")
-best_society = ranking.index[0]
+if not metrics.empty:
+    ranking = metrics.copy()
+    ranking["Score"] = (
+        ranking["Sharpe individuel"].rank(ascending=False) +
+        ranking["Rentabilité annualisée"].rank(ascending=False) +
+        ranking["Volatilité annualisée"].rank(ascending=True) +
+        ranking["Max Drawdown"].rank(ascending=False) +
+        ranking["VaR 95%"].rank(ascending=False)
+    )
+    ranking = ranking.sort_values("Score")
+    best_society = ranking.index[0] if len(ranking) > 0 else "N/A"
 
-def get_recommendation(row):
-    median_vol = metrics["Volatilité annualisée"].median()
-    if row["Sharpe individuel"] > 1 and row["Volatilité annualisée"] < median_vol:
-        return "🟢 Très attractive"
-    elif row["Sharpe individuel"] > 0.5:
-        return "🟡 Intéressante"
-    elif row["Volatilité annualisée"] > median_vol:
-        return "🔴 Risque élevé"
-    else:
-        return "⚪ À surveiller"
+    def get_recommendation(row):
+        median_vol = metrics["Volatilité annualisée"].median()
+        if row["Sharpe individuel"] > 1 and row["Volatilité annualisée"] < median_vol:
+            return "🟢 Très attractive"
+        elif row["Sharpe individuel"] > 0.5:
+            return "🟡 Intéressante"
+        elif row["Volatilité annualisée"] > median_vol:
+            return "🔴 Risque élevé"
+        else:
+            return "⚪ À surveiller"
 
-ranking["Recommandation"] = ranking.apply(get_recommendation, axis=1)
+    ranking["Recommandation"] = ranking.apply(get_recommendation, axis=1)
+else:
+    ranking = pd.DataFrame()
+    best_society = "N/A"
 
 # ==============================
 # Frontière efficiente
@@ -357,17 +382,27 @@ ranking["Recommandation"] = ranking.apply(get_recommendation, axis=1)
 
 frontier_returns = []
 frontier_vols = []
-target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 30)
+try:
+    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 20)
+    for target in target_returns:
+        cons = (
+            {"type": "eq", "fun": lambda w: np.sum(w) - 1},
+            {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
+        )
+        result = minimize(min_vol, init, method="SLSQP", bounds=bounds, constraints=cons)
+        if result.success:
+            frontier_returns.append(port_return(result.x))
+            frontier_vols.append(port_vol(result.x))
+except:
+    pass
 
-for target in target_returns:
-    cons = (
-        {"type": "eq", "fun": lambda w: np.sum(w) - 1},
-        {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
-    )
-    result = minimize(min_vol, init, method="SLSQP", bounds=bounds, constraints=cons)
-    if result.success:
-        frontier_returns.append(port_return(result.x))
-        frontier_vols.append(port_vol(result.x))
+# Fonction pour calculer VaR d'un portefeuille
+def calculate_portfolio_var(weights, returns_data, confidence_levels=[0.90, 0.95, 0.99]):
+    portfolio_returns = returns_data.dot(weights)
+    vars_dict = {}
+    for cl in confidence_levels:
+        vars_dict[f"VaR_{int(cl*100)}%"] = portfolio_returns.quantile(1-cl) * np.sqrt(252)
+    return vars_dict
 
 # ==============================
 # INTERFACE PRINCIPALE - 9 ONGLETS
@@ -391,200 +426,213 @@ with tab1:
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Nombre d'actifs", len(selected_societies))
-    col2.metric("Meilleur actif", best_society[:20])
+    col2.metric("Meilleur actif", str(best_society)[:20] if best_society != "N/A" else "N/A")
     col3.metric("Sharpe optimal", f"{sharpe_ratio:.3f}")
     col4.metric("Capital simulé", f"{capital:,.0f} TND")
     
     # Évolution des cours
-    st.subheader("📈 Évolution des cours")
-    fig_prices = px.line(selected_prices, title="Cours de clôture")
-    fig_prices.update_layout(xaxis_title="Date", yaxis_title="Prix (TND)", height=500)
-    st.plotly_chart(fig_prices, use_container_width=True)
+    if not selected_prices.empty:
+        st.subheader("📈 Évolution des cours")
+        fig_prices = px.line(selected_prices, title="Cours de clôture")
+        fig_prices.update_layout(xaxis_title="Date", yaxis_title="Prix (TND)", height=500)
+        st.plotly_chart(fig_prices, use_container_width=True)
     
     # Rendements cumulés
-    st.subheader("📊 Rendements cumulés")
-    fig_cum = px.line(cumulative_returns, title="Performance cumulée")
-    fig_cum.update_yaxes(tickformat=".0%")
-    fig_cum.update_layout(height=400)
-    st.plotly_chart(fig_cum, use_container_width=True)
+    if not cumulative_returns.empty:
+        st.subheader("📊 Rendements cumulés")
+        fig_cum = px.line(cumulative_returns, title="Performance cumulée")
+        fig_cum.update_yaxes(tickformat=".0%")
+        fig_cum.update_layout(height=400)
+        st.plotly_chart(fig_cum, use_container_width=True)
     
     # Distribution des rendements
-    st.subheader("📊 Distribution des rendements journaliers")
-    fig_dist = go.Figure()
-    for col in returns.columns[:5]:  # Limite à 5 pour lisibilité
-        fig_dist.add_trace(go.Histogram(
-            x=returns[col],
-            name=col[:20],
-            opacity=0.7,
-            nbinsx=50
-        ))
-    fig_dist.update_layout(
-        title="Histogramme des rendements journaliers",
-        xaxis_title="Rendement",
-        yaxis_title="Fréquence",
-        barmode='overlay',
-        height=400
-    )
-    fig_dist.update_xaxes(tickformat=".1%")
-    st.plotly_chart(fig_dist, use_container_width=True)
+    if not returns.empty:
+        st.subheader("📊 Distribution des rendements journaliers")
+        fig_dist = go.Figure()
+        for col in returns.columns[:min(5, len(returns.columns))]:
+            fig_dist.add_trace(go.Histogram(
+                x=returns[col],
+                name=col[:20],
+                opacity=0.7,
+                nbinsx=50
+            ))
+        fig_dist.update_layout(
+            title="Histogramme des rendements journaliers",
+            xaxis_title="Rendement",
+            yaxis_title="Fréquence",
+            barmode='overlay',
+            height=400
+        )
+        fig_dist.update_xaxes(tickformat=".1%")
+        st.plotly_chart(fig_dist, use_container_width=True)
 
 # ==================== TAB 2: INDICATEURS ====================
 with tab2:
     st.header("📈 Indicateurs financiers détaillés")
     
-    st.subheader("Tableau des métriques")
-    st.dataframe(
-        metrics.style.format({
-            "Rentabilité annualisée": "{:.2%}",
-            "Volatilité annualisée": "{:.2%}",
-            "Sharpe individuel": "{:.3f}",
-            "Max Drawdown": "{:.2%}",
-            "VaR 90%": "{:.2%}",
-            "VaR 95%": "{:.2%}",
-            "VaR 99%": "{:.2%}",
-            "Expected Shortfall 95%": "{:.2%}",
-            "Beta marché": "{:.3f}"
-        }),
-        use_container_width=True,
-        height=400
-    )
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Rentabilité annualisée")
-        fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité par actif")
-        fig_ret.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_ret, use_container_width=True)
-    
-    with col2:
-        st.subheader("Volatilité annualisée")
-        fig_vol = px.bar(metrics, y="Volatilité annualisée", title="Risque par actif")
-        fig_vol.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_vol, use_container_width=True)
-    
-    col3, col4 = st.columns(2)
-    
-    with col3:
-        st.subheader("Ratio de Sharpe individuel")
-        fig_sharpe = px.bar(metrics, y="Sharpe individuel", title="Sharpe par actif")
-        st.plotly_chart(fig_sharpe, use_container_width=True)
-    
-    with col4:
-        st.subheader("Beta marché")
-        fig_beta = px.bar(metrics, y="Beta marché", title="Sensibilité au marché")
-        st.plotly_chart(fig_beta, use_container_width=True)
+    if not metrics.empty:
+        st.subheader("Tableau des métriques")
+        st.dataframe(
+            metrics.style.format({
+                "Rentabilité annualisée": "{:.2%}",
+                "Volatilité annualisée": "{:.2%}",
+                "Sharpe individuel": "{:.3f}",
+                "Max Drawdown": "{:.2%}",
+                "VaR 90%": "{:.2%}",
+                "VaR 95%": "{:.2%}",
+                "VaR 99%": "{:.2%}",
+                "Expected Shortfall 95%": "{:.2%}",
+                "Beta marché": "{:.3f}"
+            }),
+            use_container_width=True,
+            height=400
+        )
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Rentabilité annualisée")
+            fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité par actif")
+            fig_ret.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_ret, use_container_width=True)
+        
+        with col2:
+            st.subheader("Volatilité annualisée")
+            fig_vol = px.bar(metrics, y="Volatilité annualisée", title="Risque par actif")
+            fig_vol.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_vol, use_container_width=True)
+        
+        col3, col4 = st.columns(2)
+        
+        with col3:
+            st.subheader("Ratio de Sharpe individuel")
+            fig_sharpe = px.bar(metrics, y="Sharpe individuel", title="Sharpe par actif")
+            st.plotly_chart(fig_sharpe, use_container_width=True)
+        
+        with col4:
+            if not beta.empty:
+                st.subheader("Beta marché")
+                fig_beta = px.bar(metrics, y="Beta marché", title="Sensibilité au marché")
+                st.plotly_chart(fig_beta, use_container_width=True)
 
 # ==================== TAB 3: RISQUES & VAR ====================
 with tab3:
     st.header("⚠️ Analyse détaillée des risques")
     
-    # Drawdown
-    st.subheader("📉 Drawdown")
-    fig_dd = px.line(drawdown, title="Drawdown des actifs")
-    fig_dd.update_yaxes(tickformat=".0%")
-    fig_dd.update_layout(height=400)
-    st.plotly_chart(fig_dd, use_container_width=True)
+    if not drawdown.empty:
+        st.subheader("📉 Drawdown")
+        fig_dd = px.line(drawdown, title="Drawdown des actifs")
+        fig_dd.update_yaxes(tickformat=".0%")
+        fig_dd.update_layout(height=400)
+        st.plotly_chart(fig_dd, use_container_width=True)
     
     col1, col2 = st.columns(2)
     
     with col1:
-        st.subheader("Max Drawdown")
-        fig_mdd = px.bar(metrics, y="Max Drawdown", title="Perte maximale")
-        fig_mdd.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_mdd, use_container_width=True)
+        if not metrics.empty:
+            st.subheader("Max Drawdown")
+            fig_mdd = px.bar(metrics, y="Max Drawdown", title="Perte maximale")
+            fig_mdd.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_mdd, use_container_width=True)
     
     with col2:
-        st.subheader("Volatilité glissante")
-        fig_roll = px.line(rolling_vol, title="Volatilité rolling 20 jours")
-        fig_roll.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_roll, use_container_width=True)
+        if not rolling_vol.empty:
+            st.subheader("Volatilité glissante")
+            fig_roll = px.line(rolling_vol, title="Volatilité rolling 20 jours")
+            fig_roll.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_roll, use_container_width=True)
     
     # Value at Risk - Comparaison
-    st.subheader("📊 Value at Risk (VaR) - Comparaison")
-    
-    var_df = pd.DataFrame({
-        "VaR 90%": var_90,
-        "VaR 95%": var_95,
-        "VaR 99%": var_99
-    }, index=metrics.index)
-    
-    fig_var_compare = px.bar(var_df, title="Comparaison des VaR par niveau de confiance", barmode="group")
-    fig_var_compare.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_var_compare, use_container_width=True)
-    
-    # Courbes de distribution avec VaR
-    st.subheader("📈 Distribution des rendements avec VaR")
-    
-    selected_var_society = st.selectbox("Choisir une société pour visualiser sa distribution", options=returns.columns.tolist())
-    
-    if selected_var_society:
-        returns_society = returns[selected_var_society].dropna()
+    if not metrics.empty:
+        st.subheader("📊 Value at Risk (VaR) - Comparaison")
         
-        fig_var_dist = go.Figure()
+        var_df = pd.DataFrame({
+            "VaR 90%": var_90,
+            "VaR 95%": var_95,
+            "VaR 99%": var_99
+        }, index=metrics.index)
         
-        # Histogramme
-        fig_var_dist.add_trace(go.Histogram(
-            x=returns_society,
-            name="Rendements",
-            nbinsx=50,
-            opacity=0.7,
-            marker_color="lightblue"
-        ))
+        fig_var_compare = px.bar(var_df, title="Comparaison des VaR par niveau de confiance", barmode="group")
+        fig_var_compare.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_var_compare, use_container_width=True)
         
-        # Lignes VaR
-        var_90_val = returns_society.quantile(0.10)
-        var_95_val = returns_society.quantile(0.05)
-        var_99_val = returns_society.quantile(0.01)
+        # Courbes de distribution avec VaR
+        st.subheader("📈 Distribution des rendements avec VaR")
         
-        fig_var_dist.add_vline(x=var_90_val, line_dash="dash", line_color="orange", 
-                               annotation_text=f"VaR 90%: {var_90_val:.2%}")
-        fig_var_dist.add_vline(x=var_95_val, line_dash="dash", line_color="red",
-                               annotation_text=f"VaR 95%: {var_95_val:.2%}")
-        fig_var_dist.add_vline(x=var_99_val, line_dash="dash", line_color="darkred",
-                               annotation_text=f"VaR 99%: {var_99_val:.2%}")
-        
-        # Courbe de densité
-        kde_x = np.linspace(returns_society.min(), returns_society.max(), 100)
-        kde = stats.gaussian_kde(returns_society.dropna())
-        fig_var_dist.add_trace(go.Scatter(
-            x=kde_x,
-            y=kde(kde_x) * len(returns_society) * (returns_society.max() - returns_society.min()) / 50,
-            name="Densité",
-            line=dict(color="blue", width=2)
-        ))
-        
-        fig_var_dist.update_layout(
-            title=f"Distribution des rendements - {selected_var_society}",
-            xaxis_title="Rendement journalier",
-            yaxis_title="Fréquence",
-            height=500
-        )
-        fig_var_dist.update_xaxes(tickformat=".1%")
-        
-        st.plotly_chart(fig_var_dist, use_container_width=True)
-        
-        # Interprétation
-        st.info(f"""
-        **Interprétation des VaR pour {selected_var_society} :**
-        - **VaR 90%** : Il y a 10% de chance que la perte quotidienne dépasse {var_90_val:.2%}
-        - **VaR 95%** : Il y a 5% de chance que la perte quotidienne dépasse {var_95_val:.2%}
-        - **VaR 99%** : Il y a 1% de chance que la perte quotidienne dépasse {var_99_val:.2%}
-        """)
+        if len(returns.columns) > 0:
+            selected_var_society = st.selectbox("Choisir une société pour visualiser sa distribution", options=returns.columns.tolist())
+            
+            if selected_var_society:
+                returns_society = returns[selected_var_society].dropna()
+                
+                if len(returns_society) > 0:
+                    fig_var_dist = go.Figure()
+                    
+                    # Histogramme
+                    fig_var_dist.add_trace(go.Histogram(
+                        x=returns_society,
+                        name="Rendements",
+                        nbinsx=50,
+                        opacity=0.7,
+                        marker_color="lightblue"
+                    ))
+                    
+                    # Lignes VaR
+                    var_90_val = returns_society.quantile(0.10)
+                    var_95_val = returns_society.quantile(0.05)
+                    var_99_val = returns_society.quantile(0.01)
+                    
+                    fig_var_dist.add_vline(x=var_90_val, line_dash="dash", line_color="orange", 
+                                           annotation_text=f"VaR 90%: {var_90_val:.2%}")
+                    fig_var_dist.add_vline(x=var_95_val, line_dash="dash", line_color="red",
+                                           annotation_text=f"VaR 95%: {var_95_val:.2%}")
+                    fig_var_dist.add_vline(x=var_99_val, line_dash="dash", line_color="darkred",
+                                           annotation_text=f"VaR 99%: {var_99_val:.2%}")
+                    
+                    # Courbe de densité
+                    try:
+                        kde_x = np.linspace(returns_society.min(), returns_society.max(), 100)
+                        kde = stats.gaussian_kde(returns_society.dropna())
+                        fig_var_dist.add_trace(go.Scatter(
+                            x=kde_x,
+                            y=kde(kde_x) * len(returns_society) * (returns_society.max() - returns_society.min()) / 50,
+                            name="Densité",
+                            line=dict(color="blue", width=2)
+                        ))
+                    except:
+                        pass
+                    
+                    fig_var_dist.update_layout(
+                        title=f"Distribution des rendements - {selected_var_society}",
+                        xaxis_title="Rendement journalier",
+                        yaxis_title="Fréquence",
+                        height=500
+                    )
+                    fig_var_dist.update_xaxes(tickformat=".1%")
+                    
+                    st.plotly_chart(fig_var_dist, use_container_width=True)
+                    
+                    st.info(f"""
+                    **Interprétation des VaR pour {selected_var_society} :**
+                    - **VaR 90%** : Il y a 10% de chance que la perte quotidienne dépasse {var_90_val:.2%}
+                    - **VaR 95%** : Il y a 5% de chance que la perte quotidienne dépasse {var_95_val:.2%}
+                    - **VaR 99%** : Il y a 1% de chance que la perte quotidienne dépasse {var_99_val:.2%}
+                    """)
     
     # Heatmap de corrélation
-    st.subheader("🔗 Matrice de corrélation")
-    fig_corr = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        aspect="auto",
-        title="Corrélations entre actifs",
-        color_continuous_scale="RdBu",
-        zmin=-1,
-        zmax=1
-    )
-    fig_corr.update_layout(height=600)
-    st.plotly_chart(fig_corr, use_container_width=True)
+    if not corr_matrix.empty:
+        st.subheader("🔗 Matrice de corrélation")
+        fig_corr = px.imshow(
+            corr_matrix,
+            text_auto=True,
+            aspect="auto",
+            title="Corrélations entre actifs",
+            color_continuous_scale="RdBu",
+            zmin=-1,
+            zmax=1
+        )
+        fig_corr.update_layout(height=600)
+        st.plotly_chart(fig_corr, use_container_width=True)
 
 # ==================== TAB 4: CML & SML ====================
 with tab4:
@@ -593,146 +641,136 @@ with tab4:
     # CML - Capital Market Line
     st.subheader("📊 Capital Market Line (CML)")
     
-    # Générer des points pour la CML
-    cml_risks = np.linspace(0, max(volatility.max(), vol_sharpe) * 1.5, 50)
-    cml_returns = rf + (ret_sharpe - rf) / vol_sharpe * cml_risks
-    
-    fig_cml = go.Figure()
-    
-    # CML line
-    fig_cml.add_trace(go.Scatter(
-        x=cml_risks,
-        y=cml_returns,
-        mode="lines",
-        name="CML (Capital Market Line)",
-        line=dict(color="green", width=3, dash="dash")
-    ))
-    
-    # Portefeuille de marché (Sharpe max)
-    fig_cml.add_trace(go.Scatter(
-        x=[vol_sharpe],
-        y=[ret_sharpe],
-        mode="markers",
-        name="Portefeuille de marché",
-        marker=dict(size=15, color="red", symbol="star")
-    ))
-    
-    # Actif sans risque
-    fig_cml.add_trace(go.Scatter(
-        x=[0],
-        y=[rf],
-        mode="markers",
-        name="Actif sans risque",
-        marker=dict(size=12, color="blue", symbol="circle")
-    ))
-    
-    # Actifs individuels
-    fig_cml.add_trace(go.Scatter(
-        x=volatility,
-        y=mean_returns,
-        mode="markers",
-        name="Actifs individuels",
-        marker=dict(size=8, color="gray", symbol="circle"),
-        text=selected_societies,
-        hoverinfo="text+x+y"
-    ))
-    
-    fig_cml.update_layout(
-        title="Capital Market Line (CML) - Taux sans risque + Portefeuille de marché",
-        xaxis_title="Risque (Volatilité annualisée)",
-        yaxis_title="Rendement attendu",
-        height=500,
-        hovermode="closest"
-    )
-    fig_cml.update_xaxes(tickformat=".0%")
-    fig_cml.update_yaxes(tickformat=".0%")
-    
-    st.plotly_chart(fig_cml, use_container_width=True)
-    
-    st.info("""
-    **Interprétation de la CML :**
-    - La CML représente le meilleur rendement possible pour un niveau de risque donné
-    - Le portefeuille de marché (point rouge) est le portefeuille tangent qui maximise le Sharpe
-    - Tous les investisseurs rationnels devraient combiner le portefeuille de marché avec l'actif sans risque
-    """)
+    if vol_sharpe > 0:
+        cml_risks = np.linspace(0, max(volatility.max(), vol_sharpe) * 1.5, 50)
+        cml_returns = rf + (ret_sharpe - rf) / vol_sharpe * cml_risks
+        
+        fig_cml = go.Figure()
+        
+        fig_cml.add_trace(go.Scatter(
+            x=cml_risks,
+            y=cml_returns,
+            mode="lines",
+            name="CML (Capital Market Line)",
+            line=dict(color="green", width=3, dash="dash")
+        ))
+        
+        fig_cml.add_trace(go.Scatter(
+            x=[vol_sharpe],
+            y=[ret_sharpe],
+            mode="markers",
+            name="Portefeuille de marché",
+            marker=dict(size=15, color="red", symbol="star")
+        ))
+        
+        fig_cml.add_trace(go.Scatter(
+            x=[0],
+            y=[rf],
+            mode="markers",
+            name="Actif sans risque",
+            marker=dict(size=12, color="blue", symbol="circle")
+        ))
+        
+        fig_cml.add_trace(go.Scatter(
+            x=volatility,
+            y=mean_returns,
+            mode="markers",
+            name="Actifs individuels",
+            marker=dict(size=8, color="gray", symbol="circle"),
+            text=selected_societies,
+            hoverinfo="text+x+y"
+        ))
+        
+        fig_cml.update_layout(
+            title="Capital Market Line (CML) - Taux sans risque + Portefeuille de marché",
+            xaxis_title="Risque (Volatilité annualisée)",
+            yaxis_title="Rendement attendu",
+            height=500,
+            hovermode="closest"
+        )
+        fig_cml.update_xaxes(tickformat=".0%")
+        fig_cml.update_yaxes(tickformat=".0%")
+        
+        st.plotly_chart(fig_cml, use_container_width=True)
+        
+        st.info("""
+        **Interprétation de la CML :**
+        - La CML représente le meilleur rendement possible pour un niveau de risque donné
+        - Le portefeuille de marché (point rouge) est le portefeuille tangent qui maximise le Sharpe
+        - Tous les investisseurs rationnels devraient combiner le portefeuille de marché avec l'actif sans risque
+        """)
     
     # SML - Security Market Line
     st.subheader("📈 Security Market Line (SML)")
     
-    # Calcul du beta du marché (1 par définition)
-    market_beta = 1
-    
-    # SML: E(R) = Rf + β * (E(Rm) - Rf)
-    sml_betas = np.linspace(0, max(beta.max() * 1.2, 1.5), 50)
-    sml_returns = rf + (ret_sharpe - rf) * sml_betas
-    
-    fig_sml = go.Figure()
-    
-    # SML line
-    fig_sml.add_trace(go.Scatter(
-        x=sml_betas,
-        y=sml_returns,
-        mode="lines",
-        name="SML (Security Market Line)",
-        line=dict(color="purple", width=3, dash="dash")
-    ))
-    
-    # Portefeuille de marché (Beta = 1)
-    fig_sml.add_trace(go.Scatter(
-        x=[market_beta],
-        y=[ret_sharpe],
-        mode="markers",
-        name="Portefeuille de marché (β=1)",
-        marker=dict(size=15, color="red", symbol="star")
-    ))
-    
-    # Actif sans risque (Beta = 0)
-    fig_sml.add_trace(go.Scatter(
-        x=[0],
-        y=[rf],
-        mode="markers",
-        name="Actif sans risque (β=0)",
-        marker=dict(size=12, color="blue", symbol="circle")
-    ))
-    
-    # Actifs individuels
-    fig_sml.add_trace(go.Scatter(
-        x=beta,
-        y=mean_returns,
-        mode="markers",
-        name="Actifs individuels",
-        marker=dict(size=10, color="gray", symbol="circle"),
-        text=[f"{s}<br>β: {b:.2f}<br>R: {r:.2%}" for s, b, r in zip(selected_societies, beta, mean_returns)],
-        hoverinfo="text"
-    ))
-    
-    fig_sml.update_layout(
-        title="Security Market Line (SML) - Modèle d'évaluation des actifs financiers (CAPM)",
-        xaxis_title="Beta (Risque systématique)",
-        yaxis_title="Rendement attendu",
-        height=500,
-        hovermode="closest"
-    )
-    fig_sml.update_yaxes(tickformat=".0%")
-    
-    st.plotly_chart(fig_sml, use_container_width=True)
-    
-    st.info("""
-    **Interprétation de la SML :**
-    - La SML représente le rendement attendu en fonction du risque systématique (Beta)
-    - Les actifs au-dessus de la ligne sont sous-évalués (rendement > risque)
-    - Les actifs en-dessous de la ligne sont sur-évalués (rendement < risque)
-    - Le Beta mesure la sensibilité de l'actif aux mouvements du marché
-    """)
-    
-    # Tableau des Betas
-    st.subheader("📊 Betas des actifs")
-    beta_df = pd.DataFrame({
-        "Société": beta.index,
-        "Beta": beta.values,
-        "Interprétation": ["Défensif (β<1)" if b < 1 else "Agressif (β>1)" if b > 1 else "Neutre (β=1)" for b in beta.values]
-    })
-    st.dataframe(beta_df.style.format({"Beta": "{:.3f}"}), use_container_width=True)
+    if not beta.empty and ret_sharpe > 0:
+        market_beta = 1
+        sml_betas = np.linspace(0, max(beta.max() * 1.2, 1.5), 50)
+        sml_returns = rf + (ret_sharpe - rf) * sml_betas
+        
+        fig_sml = go.Figure()
+        
+        fig_sml.add_trace(go.Scatter(
+            x=sml_betas,
+            y=sml_returns,
+            mode="lines",
+            name="SML (Security Market Line)",
+            line=dict(color="purple", width=3, dash="dash")
+        ))
+        
+        fig_sml.add_trace(go.Scatter(
+            x=[market_beta],
+            y=[ret_sharpe],
+            mode="markers",
+            name="Portefeuille de marché (β=1)",
+            marker=dict(size=15, color="red", symbol="star")
+        ))
+        
+        fig_sml.add_trace(go.Scatter(
+            x=[0],
+            y=[rf],
+            mode="markers",
+            name="Actif sans risque (β=0)",
+            marker=dict(size=12, color="blue", symbol="circle")
+        ))
+        
+        fig_sml.add_trace(go.Scatter(
+            x=beta,
+            y=mean_returns,
+            mode="markers",
+            name="Actifs individuels",
+            marker=dict(size=10, color="gray", symbol="circle"),
+            text=[f"{s}<br>β: {b:.2f}<br>R: {r:.2%}" for s, b, r in zip(selected_societies, beta, mean_returns)],
+            hoverinfo="text"
+        ))
+        
+        fig_sml.update_layout(
+            title="Security Market Line (SML) - Modèle d'évaluation des actifs financiers (CAPM)",
+            xaxis_title="Beta (Risque systématique)",
+            yaxis_title="Rendement attendu",
+            height=500,
+            hovermode="closest"
+        )
+        fig_sml.update_yaxes(tickformat=".0%")
+        
+        st.plotly_chart(fig_sml, use_container_width=True)
+        
+        st.info("""
+        **Interprétation de la SML :**
+        - La SML représente le rendement attendu en fonction du risque systématique (Beta)
+        - Les actifs au-dessus de la ligne sont sous-évalués (rendement > risque)
+        - Les actifs en-dessous de la ligne sont sur-évalués (rendement < risque)
+        - Le Beta mesure la sensibilité de l'actif aux mouvements du marché
+        """)
+        
+        # Tableau des Betas
+        st.subheader("📊 Betas des actifs")
+        beta_df = pd.DataFrame({
+            "Société": beta.index,
+            "Beta": beta.values,
+            "Interprétation": ["Défensif (β<1)" if b < 1 else "Agressif (β>1)" if b > 1 else "Neutre (β=1)" for b in beta.values]
+        })
+        st.dataframe(beta_df.style.format({"Beta": "{:.3f}"}), use_container_width=True)
 
 # ==================== TAB 5: OPTIMISATION ====================
 with tab5:
@@ -740,19 +778,27 @@ with tab5:
     
     col1, col2 = st.columns(2)
     
+    # Calculer les VaR des portefeuilles
+    try:
+        portfolio_var_sharpe = calculate_portfolio_var(weights_sharpe, returns)
+        portfolio_var_minvar = calculate_portfolio_var(weights_minvar, returns)
+    except:
+        portfolio_var_sharpe = {"VaR_90%": 0, "VaR_95%": 0, "VaR_99%": 0}
+        portfolio_var_minvar = {"VaR_90%": 0, "VaR_95%": 0, "VaR_99%": 0}
+    
     with col1:
         st.subheader("📈 Portefeuille Sharpe Maximum")
         st.metric("Rentabilité", f"{ret_sharpe:.2%}")
         st.metric("Risque", f"{vol_sharpe:.2%}")
         st.metric("Ratio de Sharpe", f"{sharpe_ratio:.4f}")
-        st.metric("VaR 95%", f"{np.percentile([port_return(weights_sharpe) for _ in range(1000)], 5):.2%}")
+        st.metric("VaR 95%", f"{portfolio_var_sharpe.get('VaR_95%', 0):.2%}")
     
     with col2:
         st.subheader("🛡️ Portefeuille Variance Minimale")
         st.metric("Rentabilité", f"{ret_minvar:.2%}")
         st.metric("Risque", f"{vol_minvar:.2%}")
         st.metric("Ratio de Sharpe", f"{sharpe_minvar:.4f}")
-        st.metric("VaR 95%", f"{np.percentile([port_return(weights_minvar) for _ in range(1000)], 5):.2%}")
+        st.metric("VaR 95%", f"{portfolio_var_minvar.get('VaR_95%', 0):.2%}")
     
     # Tableau des poids
     st.subheader("📊 Allocation des portefeuilles")
@@ -797,66 +843,69 @@ with tab5:
 with tab6:
     st.header("📉 Frontière efficiente de Markowitz")
     
-    fig_frontier = go.Figure()
-    
-    # Frontière
-    fig_frontier.add_trace(go.Scatter(
-        x=frontier_vols,
-        y=frontier_returns,
-        mode="lines+markers",
-        name="Frontière efficiente",
-        line=dict(color="blue", width=2),
-        marker=dict(size=5, color="lightblue")
-    ))
-    
-    # Portefeuille Sharpe max
-    fig_frontier.add_trace(go.Scatter(
-        x=[vol_sharpe],
-        y=[ret_sharpe],
-        mode="markers",
-        name="Sharpe max",
-        marker=dict(size=15, color="red", symbol="star")
-    ))
-    
-    # Portefeuille variance min
-    fig_frontier.add_trace(go.Scatter(
-        x=[vol_minvar],
-        y=[ret_minvar],
-        mode="markers",
-        name="Variance min",
-        marker=dict(size=15, color="green", symbol="triangle-up")
-    ))
-    
-    # Actifs individuels
-    fig_frontier.add_trace(go.Scatter(
-        x=volatility,
-        y=mean_returns,
-        mode="markers",
-        name="Actifs individuels",
-        marker=dict(size=10, color="gray", symbol="circle"),
-        text=selected_societies,
-        hoverinfo="text+x+y"
-    ))
-    
-    fig_frontier.update_layout(
-        title="Frontière efficiente de Markowitz",
-        xaxis_title="Risque (Volatilité annualisée)",
-        yaxis_title="Rendement annualisé",
-        height=600,
-        hovermode="closest"
-    )
-    fig_frontier.update_xaxes(tickformat=".0%")
-    fig_frontier.update_yaxes(tickformat=".0%")
-    
-    st.plotly_chart(fig_frontier, use_container_width=True)
-    
-    st.info("""
-    **Interprétation de la frontière efficiente :**
-    - La courbe bleue représente l'ensemble des portefeuilles optimaux
-    - Le point rouge ⭐ est le portefeuille qui maximise le ratio de Sharpe
-    - Le point vert ▲ est le portefeuille de variance minimale
-    - Les points gris sont les actifs individuels
-    """)
+    if len(frontier_vols) > 0:
+        fig_frontier = go.Figure()
+        
+        # Frontière
+        fig_frontier.add_trace(go.Scatter(
+            x=frontier_vols,
+            y=frontier_returns,
+            mode="lines+markers",
+            name="Frontière efficiente",
+            line=dict(color="blue", width=2),
+            marker=dict(size=5, color="lightblue")
+        ))
+        
+        # Portefeuille Sharpe max
+        fig_frontier.add_trace(go.Scatter(
+            x=[vol_sharpe],
+            y=[ret_sharpe],
+            mode="markers",
+            name="Sharpe max",
+            marker=dict(size=15, color="red", symbol="star")
+        ))
+        
+        # Portefeuille variance min
+        fig_frontier.add_trace(go.Scatter(
+            x=[vol_minvar],
+            y=[ret_minvar],
+            mode="markers",
+            name="Variance min",
+            marker=dict(size=15, color="green", symbol="triangle-up")
+        ))
+        
+        # Actifs individuels
+        fig_frontier.add_trace(go.Scatter(
+            x=volatility,
+            y=mean_returns,
+            mode="markers",
+            name="Actifs individuels",
+            marker=dict(size=10, color="gray", symbol="circle"),
+            text=selected_societies,
+            hoverinfo="text+x+y"
+        ))
+        
+        fig_frontier.update_layout(
+            title="Frontière efficiente de Markowitz",
+            xaxis_title="Risque (Volatilité annualisée)",
+            yaxis_title="Rendement annualisé",
+            height=600,
+            hovermode="closest"
+        )
+        fig_frontier.update_xaxes(tickformat=".0%")
+        fig_frontier.update_yaxes(tickformat=".0%")
+        
+        st.plotly_chart(fig_frontier, use_container_width=True)
+        
+        st.info("""
+        **Interprétation de la frontière efficiente :**
+        - La courbe bleue représente l'ensemble des portefeuilles optimaux
+        - Le point rouge ⭐ est le portefeuille qui maximise le ratio de Sharpe
+        - Le point vert ▲ est le portefeuille de variance minimale
+        - Les points gris sont les actifs individuels
+        """)
+    else:
+        st.info("Frontière efficiente non disponible pour cette sélection")
 
 # ==================== TAB 7: RECOMMANDATIONS ====================
 with tab7:
@@ -864,51 +913,52 @@ with tab7:
     
     st.info("Cette analyse est basée sur les données historiques et ne constitue pas un conseil financier personnalisé.")
     
-    st.success(f"🏆 **Meilleure société selon le modèle : {best_society}**")
-    
-    st.subheader("Classement des actifs")
-    st.dataframe(
-        ranking.style.format({
-            "Rentabilité annualisée": "{:.2%}",
-            "Volatilité annualisée": "{:.2%}",
-            "Sharpe individuel": "{:.3f}",
-            "Max Drawdown": "{:.2%}",
-            "VaR 90%": "{:.2%}",
-            "VaR 95%": "{:.2%}",
-            "VaR 99%": "{:.2%}",
-            "Beta marché": "{:.3f}",
-            "Score": "{:.0f}"
-        }),
-        use_container_width=True,
-        height=400
-    )
-    
-    # Graphique du score
-    fig_score = px.bar(
-        ranking.reset_index().rename(columns={"index": "Société"}),
-        x="Société",
-        y="Score",
-        color="Recommandation",
-        title="Score de qualité par actif"
-    )
-    st.plotly_chart(fig_score, use_container_width=True)
-    
-    # Carte de recommandation
-    st.subheader("Carte des recommandations")
-    reco_df = ranking.reset_index().rename(columns={"index": "Société"})
-    fig_reco = px.scatter(
-        reco_df,
-        x="Volatilité annualisée",
-        y="Rentabilité annualisée",
-        color="Recommandation",
-        size="Sharpe individuel",
-        text="Société",
-        title="Recommandations basées sur rendement/risque"
-    )
-    fig_reco.update_xaxes(tickformat=".0%")
-    fig_reco.update_yaxes(tickformat=".0%")
-    fig_reco.update_layout(height=500)
-    st.plotly_chart(fig_reco, use_container_width=True)
+    if not ranking.empty:
+        st.success(f"🏆 **Meilleure société selon le modèle : {best_society}**")
+        
+        st.subheader("Classement des actifs")
+        st.dataframe(
+            ranking.style.format({
+                "Rentabilité annualisée": "{:.2%}",
+                "Volatilité annualisée": "{:.2%}",
+                "Sharpe individuel": "{:.3f}",
+                "Max Drawdown": "{:.2%}",
+                "VaR 90%": "{:.2%}",
+                "VaR 95%": "{:.2%}",
+                "VaR 99%": "{:.2%}",
+                "Beta marché": "{:.3f}",
+                "Score": "{:.0f}"
+            }),
+            use_container_width=True,
+            height=400
+        )
+        
+        # Graphique du score
+        fig_score = px.bar(
+            ranking.reset_index().rename(columns={"index": "Société"}),
+            x="Société",
+            y="Score",
+            color="Recommandation",
+            title="Score de qualité par actif"
+        )
+        st.plotly_chart(fig_score, use_container_width=True)
+        
+        # Carte de recommandation
+        st.subheader("Carte des recommandations")
+        reco_df = ranking.reset_index().rename(columns={"index": "Société"})
+        fig_reco = px.scatter(
+            reco_df,
+            x="Volatilité annualisée",
+            y="Rentabilité annualisée",
+            color="Recommandation",
+            size="Sharpe individuel",
+            text="Société",
+            title="Recommandations basées sur rendement/risque"
+        )
+        fig_reco.update_xaxes(tickformat=".0%")
+        fig_reco.update_yaxes(tickformat=".0%")
+        fig_reco.update_layout(height=500)
+        st.plotly_chart(fig_reco, use_container_width=True)
     
     st.warning("""
     ⚠️ **Avertissement :** 
@@ -970,7 +1020,7 @@ with tab8:
         st.metric("Capital à investir", f"{capital:,.0f} TND")
         st.metric("Rentabilité attendue", f"{ret_minvar:.2%}")
         st.metric("Risque attendu", f"{vol_minvar:.2%}")
-        st.metric("VaR 95% attendue", f"{np.percentile([port_return(weights_minvar) for _ in range(1000)], 5):.2%}")
+        st.metric("VaR 95% attendue", f"{portfolio_var_minvar.get('VaR_95%', 0):.2%}")
     elif profile == "Équilibré":
         st.success("✅ **Recommandation :** Mixte (50% Sharpe max + 50% Variance min)")
         st.write("Ce portefeuille équilibre rendement et risque.")
@@ -985,7 +1035,7 @@ with tab8:
         st.metric("Capital à investir", f"{capital:,.0f} TND")
         st.metric("Rentabilité attendue", f"{ret_sharpe:.2%}")
         st.metric("Risque attendu", f"{vol_sharpe:.2%}")
-        st.metric("VaR 95% attendue", f"{np.percentile([port_return(weights_sharpe) for _ in range(1000)], 5):.2%}")
+        st.metric("VaR 95% attendue", f"{portfolio_var_sharpe.get('VaR_95%', 0):.2%}")
 
 # ==================== TAB 9: EXPORT ====================
 with tab9:
@@ -1000,8 +1050,9 @@ with tab9:
             selected_prices.to_excel(writer, sheet_name="1_Prix")
             returns.to_excel(writer, sheet_name="2_Rendements_journaliers")
             cumulative_returns.to_excel(writer, sheet_name="3_Rendements_cumules")
-            metrics.to_excel(writer, sheet_name="4_Metriques_individuelles")
-            ranking.to_excel(writer, sheet_name="5_Classement")
+            if not metrics.empty:
+                metrics.to_excel(writer, sheet_name="4_Metriques_individuelles")
+                ranking.to_excel(writer, sheet_name="5_Classement")
             weights_df.to_excel(writer, sheet_name="6_Allocation_portefeuille", index=False)
             cov_matrix.to_excel(writer, sheet_name="7_Matrice_covariance")
             corr_matrix.to_excel(writer, sheet_name="8_Matrice_correlation")
@@ -1017,19 +1068,9 @@ with tab9:
             var_df.to_excel(writer, sheet_name="11_Value_at_Risk")
             
             # Betas
-            beta_df = pd.DataFrame({"Société": beta.index, "Beta": beta.values})
-            beta_df.to_excel(writer, sheet_name="12_Betas", index=False)
-            
-            # Statistiques du portefeuille
-            portfolio_stats = pd.DataFrame({
-                "Métrique": ["Rentabilité Sharpe max", "Risque Sharpe max", "Sharpe ratio", "VaR 95% Sharpe max",
-                            "Rentabilité variance min", "Risque variance min", "Sharpe variance min", "VaR 95% variance min"],
-                "Valeur": [f"{ret_sharpe:.2%}", f"{vol_sharpe:.2%}", f"{sharpe_ratio:.4f}",
-                          f"{np.percentile([port_return(weights_sharpe) for _ in range(1000)], 5):.2%}",
-                          f"{ret_minvar:.2%}", f"{vol_minvar:.2%}", f"{sharpe_minvar:.4f}",
-                          f"{np.percentile([port_return(weights_minvar) for _ in range(1000)], 5):.2%}"]
-            })
-            portfolio_stats.to_excel(writer, sheet_name="13_Stats_portefeuille", index=False)
+            if not beta.empty:
+                beta_df = pd.DataFrame({"Société": beta.index, "Beta": beta.values})
+                beta_df.to_excel(writer, sheet_name="12_Betas", index=False)
         
         st.download_button(
             label="📥 Télécharger le rapport Excel complet",
@@ -1052,7 +1093,6 @@ with tab9:
     - ✅ Analyse des risques (Drawdown, volatilité glissante)
     - ✅ Value at Risk (3 niveaux de confiance)
     - ✅ Betas individuels
-    - ✅ Statistiques des portefeuilles optimisés
     """)
 
 # ==================== SIDEBAR FOOTER ====================
