@@ -1,6 +1,8 @@
 import io
 from pathlib import Path
 import re
+import warnings
+warnings.filterwarnings('ignore')
 
 import streamlit as st
 import pandas as pd
@@ -72,6 +74,9 @@ def prepare_data(data):
         return None, ["Données vides après nettoyage"], []
 
     data["Année"] = data["Date"].dt.year
+    
+    # Convertir les années en int Python natif
+    data["Année"] = data["Année"].astype(int)
 
     prices = data.pivot_table(
         index="Date",
@@ -83,6 +88,25 @@ def prepare_data(data):
     prices = prices.sort_index().ffill()
 
     return (data, prices), [], []
+
+
+def convert_numpy_types(obj):
+    """Convertit les types numpy en types Python natifs"""
+    if isinstance(obj, (np.integer, np.int64, np.int32)):
+        return int(obj)
+    elif isinstance(obj, (np.floating, np.float64, np.float32)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, pd.Series):
+        return obj.apply(convert_numpy_types)
+    elif isinstance(obj, pd.DataFrame):
+        return obj.applymap(convert_numpy_types)
+    elif isinstance(obj, dict):
+        return {k: convert_numpy_types(v) for k, v in obj.items()}
+    elif isinstance(obj, (list, tuple)):
+        return [convert_numpy_types(item) for item in obj]
+    return obj
 
 
 # ==============================
@@ -127,6 +151,10 @@ try:
     if data_raw is None:
         st.error("Aucune donnée chargée depuis les fichiers Excel.")
         st.stop()
+    
+    # Convertir les types numpy
+    data_raw = convert_numpy_types(data_raw)
+    
 except Exception as e:
     st.error(f"Erreur lors du chargement Excel : {e}")
     st.stop()
@@ -143,6 +171,10 @@ if errors:
 
 data, prices = prepared
 
+# Convertir les types numpy dans les données traitées
+data = convert_numpy_types(data)
+prices = convert_numpy_types(prices)
+
 # Vérifier si prices est vide
 if prices.empty:
     st.error("Aucune donnée de prix après traitement.")
@@ -155,8 +187,9 @@ if prices.empty:
 st.sidebar.write("📅 Période détectée")
 st.sidebar.write(data["Date"].min(), "→", data["Date"].max())
 
+annees_disponibles = sorted([int(a) for a in data["Année"].dropna().unique()])
 st.sidebar.write("📊 Années disponibles")
-st.sidebar.write(sorted(data["Année"].dropna().unique()))
+st.sidebar.write(annees_disponibles)
 
 # ==============================
 # Banques
@@ -225,54 +258,63 @@ if len(selected_banques) < 2:
 # Calculs financiers
 # ==============================
 
-selected_prices = prices[selected_banques].dropna(how="all").ffill()
-
-# Vérifier qu'on a assez de données
-if len(selected_prices) < 2:
-    st.error("Pas assez de données de prix pour l'analyse.")
+try:
+    selected_prices = prices[selected_banques].dropna(how="all").ffill()
+    
+    # Vérifier qu'on a assez de données
+    if len(selected_prices) < 2:
+        st.error("Pas assez de données de prix pour l'analyse.")
+        st.stop()
+    
+    returns = selected_prices.pct_change().dropna()
+    
+    if returns.empty or len(returns) < 2:
+        st.error("Pas assez de données pour calculer les rendements.")
+        st.stop()
+    
+    mean_returns = returns.mean() * 252
+    volatility = returns.std() * np.sqrt(252)
+    cov_matrix = returns.cov() * 252
+    corr_matrix = returns.corr()
+    
+    cumulative_returns = (1 + returns).cumprod() - 1
+    rolling_vol = returns.rolling(30).std() * np.sqrt(252)
+    
+    drawdown = selected_prices / selected_prices.cummax() - 1
+    max_drawdown = drawdown.min()
+    
+    var_95 = returns.quantile(0.05) * np.sqrt(252)
+    expected_shortfall = returns[returns.le(returns.quantile(0.05))].mean() * np.sqrt(252)
+    
+    market_return = returns.mean(axis=1)
+    
+    beta = {}
+    for col in returns.columns:
+        cov = np.cov(returns[col], market_return)[0][1]
+        var = np.var(market_return)
+        beta[col] = cov / var if var != 0 else np.nan
+    
+    beta = pd.Series(beta)
+    
+    # Convertir les résultats en types Python natifs
+    mean_returns = convert_numpy_types(mean_returns)
+    volatility = convert_numpy_types(volatility)
+    
+    metrics = pd.DataFrame({
+        "Rentabilité annualisée": mean_returns,
+        "Volatilité annualisée": volatility,
+        "Sharpe individuel": (mean_returns - rf) / volatility,
+        "Max Drawdown": max_drawdown,
+        "VaR 95%": var_95,
+        "Expected Shortfall": expected_shortfall,
+        "Beta marché": beta
+    })
+    
+    metrics = metrics.replace([np.inf, -np.inf], np.nan).dropna()
+    
+except Exception as e:
+    st.error(f"Erreur lors des calculs financiers : {e}")
     st.stop()
-
-returns = selected_prices.pct_change().dropna()
-
-if returns.empty or len(returns) < 2:
-    st.error("Pas assez de données pour calculer les rendements.")
-    st.stop()
-
-mean_returns = returns.mean() * 252
-volatility = returns.std() * np.sqrt(252)
-cov_matrix = returns.cov() * 252
-corr_matrix = returns.corr()
-
-cumulative_returns = (1 + returns).cumprod() - 1
-rolling_vol = returns.rolling(30).std() * np.sqrt(252)
-
-drawdown = selected_prices / selected_prices.cummax() - 1
-max_drawdown = drawdown.min()
-
-var_95 = returns.quantile(0.05) * np.sqrt(252)
-expected_shortfall = returns[returns.le(returns.quantile(0.05))].mean() * np.sqrt(252)
-
-market_return = returns.mean(axis=1)
-
-beta = {}
-for col in returns.columns:
-    cov = np.cov(returns[col], market_return)[0][1]
-    var = np.var(market_return)
-    beta[col] = cov / var if var != 0 else np.nan
-
-beta = pd.Series(beta)
-
-metrics = pd.DataFrame({
-    "Rentabilité annualisée": mean_returns,
-    "Volatilité annualisée": volatility,
-    "Sharpe individuel": (mean_returns - rf) / volatility,
-    "Max Drawdown": max_drawdown,
-    "VaR 95%": var_95,
-    "Expected Shortfall": expected_shortfall,
-    "Beta marché": beta
-})
-
-metrics = metrics.replace([np.inf, -np.inf], np.nan).dropna()
 
 # ==============================
 # Optimisation Markowitz
@@ -299,46 +341,51 @@ def min_vol(w):
 constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1}
 bounds = tuple((0, 1) for _ in range(n))
 
-result_sharpe = minimize(
-    neg_sharpe,
-    init,
-    method="SLSQP",
-    bounds=bounds,
-    constraints=constraints
-)
-
-result_minvar = minimize(
-    min_vol,
-    init,
-    method="SLSQP",
-    bounds=bounds,
-    constraints=constraints
-)
-
-if not result_sharpe.success or not result_minvar.success:
-    st.error("Erreur d'optimisation.")
-    st.write("Erreur Sharpe:", result_sharpe.message)
-    st.write("Erreur MinVar:", result_minvar.message)
+try:
+    result_sharpe = minimize(
+        neg_sharpe,
+        init,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints
+    )
+    
+    result_minvar = minimize(
+        min_vol,
+        init,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints
+    )
+    
+    if not result_sharpe.success or not result_minvar.success:
+        st.error("Erreur d'optimisation.")
+        st.write("Erreur Sharpe:", result_sharpe.message)
+        st.write("Erreur MinVar:", result_minvar.message)
+        st.stop()
+    
+    weights_sharpe = result_sharpe.x
+    weights_minvar = result_minvar.x
+    
+    ret_sharpe = port_return(weights_sharpe)
+    vol_sharpe = port_vol(weights_sharpe)
+    sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
+    
+    ret_minvar = port_return(weights_minvar)
+    vol_minvar = port_vol(weights_minvar)
+    sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
+    
+    weights_df = pd.DataFrame({
+        "Banque": selected_banques,
+        "Poids Sharpe max": weights_sharpe,
+        "Montant Sharpe max": weights_sharpe * capital,
+        "Poids variance minimale": weights_minvar,
+        "Montant variance minimale": weights_minvar * capital
+    })
+    
+except Exception as e:
+    st.error(f"Erreur lors de l'optimisation : {e}")
     st.stop()
-
-weights_sharpe = result_sharpe.x
-weights_minvar = result_minvar.x
-
-ret_sharpe = port_return(weights_sharpe)
-vol_sharpe = port_vol(weights_sharpe)
-sharpe_ratio = (ret_sharpe - rf) / vol_sharpe if vol_sharpe > 0 else 0
-
-ret_minvar = port_return(weights_minvar)
-vol_minvar = port_vol(weights_minvar)
-sharpe_minvar = (ret_minvar - rf) / vol_minvar if vol_minvar > 0 else 0
-
-weights_df = pd.DataFrame({
-    "Banque": selected_banques,
-    "Poids Sharpe max": weights_sharpe,
-    "Montant Sharpe max": weights_sharpe * capital,
-    "Poids variance minimale": weights_minvar,
-    "Montant variance minimale": weights_minvar * capital
-})
 
 # ==============================
 # Recommandations
@@ -388,27 +435,29 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
 
 with tab1:
     st.subheader("Résumé global")
-
+    
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Nombre de banques", len(selected_banques))
-    col2.metric("Meilleure banque", best_bank)
-    col3.metric("Sharpe max", f"{sharpe_ratio:.4f}")
-    col4.metric("Capital simulé", f"{capital:,.0f}")
-
-    fig_prices = px.line(selected_prices, title="Évolution des cours de clôture")
-    fig_prices.update_layout(xaxis_title="Date", yaxis_title="Cours")
-    st.plotly_chart(fig_prices, use_container_width=True)
-
-    fig_cum = px.line(cumulative_returns, title="Rentabilité cumulée")
-    fig_cum.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_cum, use_container_width=True)
-
+    col2.metric("Meilleure banque", str(best_bank))
+    col3.metric("Sharpe max", f"{float(sharpe_ratio):.4f}")
+    col4.metric("Capital simulé", f"{float(capital):,.0f}")
+    
+    if not selected_prices.empty:
+        fig_prices = px.line(selected_prices, title="Évolution des cours de clôture")
+        fig_prices.update_layout(xaxis_title="Date", yaxis_title="Cours")
+        st.plotly_chart(fig_prices, use_container_width=True)
+    
+    if not cumulative_returns.empty:
+        fig_cum = px.line(cumulative_returns, title="Rentabilité cumulée")
+        fig_cum.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_cum, use_container_width=True)
+    
     # Nettoyer les données pour le graphique scatter
     rr = metrics.reset_index().rename(columns={"index": "Banque"})
-    # Supprimer les lignes avec des valeurs NaN ou inf dans les colonnes nécessaires
+    rr = convert_numpy_types(rr)
     rr = rr.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
     
-    if not rr.empty:
+    if not rr.empty and len(rr) > 1:
         fig_rr = px.scatter(
             rr,
             x="Volatilité annualisée",
@@ -422,269 +471,251 @@ with tab1:
         fig_rr.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_rr, use_container_width=True)
     else:
-        st.warning("Pas assez de données valides pour afficher la carte rendement/risque")
+        st.info("Pas assez de données valides pour afficher la carte rendement/risque")
 
 with tab2:
     st.subheader("Tableau des indicateurs")
-
-    st.dataframe(
-        metrics.style.format({
-            "Rentabilité annualisée": "{:.2%}",
-            "Volatilité annualisée": "{:.2%}",
-            "Sharpe individuel": "{:.4f}",
-            "Max Drawdown": "{:.2%}",
-            "VaR 95%": "{:.2%}",
-            "Expected Shortfall": "{:.2%}",
-            "Beta marché": "{:.4f}"
-        }),
-        use_container_width=True
-    )
-
-    # Vérifier que les données sont valides avant de créer les graphiques
+    
+    if not metrics.empty:
+        st.dataframe(
+            metrics.style.format({
+                "Rentabilité annualisée": "{:.2%}",
+                "Volatilité annualisée": "{:.2%}",
+                "Sharpe individuel": "{:.4f}",
+                "Max Drawdown": "{:.2%}",
+                "VaR 95%": "{:.2%}",
+                "Expected Shortfall": "{:.2%}",
+                "Beta marché": "{:.4f}"
+            }),
+            use_container_width=True
+        )
+    
+    # Graphiques
     if not metrics["Rentabilité annualisée"].dropna().empty:
         fig_ret = px.bar(metrics, y="Rentabilité annualisée", title="Rentabilité annualisée")
         fig_ret.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_ret, use_container_width=True)
-    else:
-        st.info("Données de rentabilité non disponibles")
-
+    
     if not metrics["Volatilité annualisée"].dropna().empty:
         fig_vol = px.bar(metrics, y="Volatilité annualisée", title="Volatilité annualisée")
         fig_vol.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_vol, use_container_width=True)
-    else:
-        st.info("Données de volatilité non disponibles")
-
+    
     if not metrics["Sharpe individuel"].dropna().empty:
         fig_sharpe = px.bar(metrics, y="Sharpe individuel", title="Ratio de Sharpe")
         st.plotly_chart(fig_sharpe, use_container_width=True)
-    else:
-        st.info("Données de Sharpe non disponibles")
-
+    
     if not metrics["Beta marché"].dropna().empty:
         fig_beta = px.bar(metrics, y="Beta marché", title="Beta relatif au marché bancaire")
         st.plotly_chart(fig_beta, use_container_width=True)
-    else:
-        st.info("Données de Beta non disponibles")
 
 with tab3:
     st.subheader("Analyse des risques")
-
+    
     if not drawdown.empty and not drawdown.isna().all().all():
         fig_drawdown = px.line(drawdown, title="Drawdown des banques sélectionnées")
         fig_drawdown.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_drawdown, use_container_width=True)
-    else:
-        st.info("Données de drawdown non disponibles")
-
+    
     if not metrics["Max Drawdown"].dropna().empty:
         fig_max_dd = px.bar(metrics, y="Max Drawdown", title="Max Drawdown par banque")
         fig_max_dd.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_max_dd, use_container_width=True)
-    else:
-        st.info("Données de Max Drawdown non disponibles")
-
+    
     if not metrics["VaR 95%"].dropna().empty:
         fig_var = px.bar(metrics, y="VaR 95%", title="Value at Risk 95%")
         fig_var.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_var, use_container_width=True)
-    else:
-        st.info("Données VaR non disponibles")
-
+    
     if not metrics["Expected Shortfall"].dropna().empty:
         fig_es = px.bar(metrics, y="Expected Shortfall", title="Expected Shortfall")
         fig_es.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_es, use_container_width=True)
-    else:
-        st.info("Données Expected Shortfall non disponibles")
-
+    
     if not rolling_vol.empty and not rolling_vol.isna().all().all():
         fig_roll = px.line(rolling_vol, title="Volatilité glissante annualisée 30 jours")
         fig_roll.update_yaxes(tickformat=".0%")
         st.plotly_chart(fig_roll, use_container_width=True)
-    else:
-        st.info("Données de volatilité glissante non disponibles")
-
+    
     if not corr_matrix.empty:
         fig_corr = px.imshow(corr_matrix, text_auto=True, title="Heatmap de corrélation", aspect="auto")
         st.plotly_chart(fig_corr, use_container_width=True)
-    else:
-        st.info("Matrice de corrélation non disponible")
 
 with tab4:
     st.subheader("Portefeuille Sharpe maximum")
-
+    
     c1, c2, c3 = st.columns(3)
-    c1.metric("Rentabilité", f"{ret_sharpe:.2%}")
-    c2.metric("Risque", f"{vol_sharpe:.2%}")
-    c3.metric("Sharpe", f"{sharpe_ratio:.4f}")
-
+    c1.metric("Rentabilité", f"{float(ret_sharpe):.2%}")
+    c2.metric("Risque", f"{float(vol_sharpe):.2%}")
+    c3.metric("Sharpe", f"{float(sharpe_ratio):.4f}")
+    
     st.subheader("Portefeuille variance minimale")
-
+    
     c4, c5, c6 = st.columns(3)
-    c4.metric("Rentabilité", f"{ret_minvar:.2%}")
-    c5.metric("Risque", f"{vol_minvar:.2%}")
-    c6.metric("Sharpe", f"{sharpe_minvar:.4f}")
-
+    c4.metric("Rentabilité", f"{float(ret_minvar):.2%}")
+    c5.metric("Risque", f"{float(vol_minvar):.2%}")
+    c6.metric("Sharpe", f"{float(sharpe_minvar):.4f}")
+    
     st.subheader("Poids et montants à investir")
-
-    st.dataframe(
-        weights_df.style.format({
-            "Poids Sharpe max": "{:.2%}",
-            "Montant Sharpe max": "{:,.2f}",
-            "Poids variance minimale": "{:.2%}",
-            "Montant variance minimale": "{:,.2f}"
-        }),
-        use_container_width=True
-    )
-
-    weights_long = weights_df.melt(
-        id_vars="Banque",
-        value_vars=["Poids Sharpe max", "Poids variance minimale"],
-        var_name="Portefeuille",
-        value_name="Poids"
-    )
-
-    fig_weights = px.bar(
-        weights_long,
-        x="Banque",
-        y="Poids",
-        color="Portefeuille",
-        barmode="group",
-        title="Comparaison des poids optimaux"
-    )
-    fig_weights.update_yaxes(tickformat=".0%")
-    st.plotly_chart(fig_weights, use_container_width=True)
-
-    if (weights_df["Poids Sharpe max"] > 0).any():
-        fig_pie1 = px.pie(weights_df, names="Banque", values="Poids Sharpe max", title="Répartition portefeuille Sharpe max")
-        st.plotly_chart(fig_pie1, use_container_width=True)
-    else:
-        st.info("Aucun poids positif pour le portefeuille Sharpe max")
-
-    if (weights_df["Poids variance minimale"] > 0).any():
-        fig_pie2 = px.pie(weights_df, names="Banque", values="Poids variance minimale", title="Répartition portefeuille variance minimale")
-        st.plotly_chart(fig_pie2, use_container_width=True)
-    else:
-        st.info("Aucun poids positif pour le portefeuille variance minimale")
+    
+    if not weights_df.empty:
+        st.dataframe(
+            weights_df.style.format({
+                "Poids Sharpe max": "{:.2%}",
+                "Montant Sharpe max": "{:,.2f}",
+                "Poids variance minimale": "{:.2%}",
+                "Montant variance minimale": "{:,.2f}"
+            }),
+            use_container_width=True
+        )
+        
+        weights_long = weights_df.melt(
+            id_vars="Banque",
+            value_vars=["Poids Sharpe max", "Poids variance minimale"],
+            var_name="Portefeuille",
+            value_name="Poids"
+        )
+        
+        fig_weights = px.bar(
+            weights_long,
+            x="Banque",
+            y="Poids",
+            color="Portefeuille",
+            barmode="group",
+            title="Comparaison des poids optimaux"
+        )
+        fig_weights.update_yaxes(tickformat=".0%")
+        st.plotly_chart(fig_weights, use_container_width=True)
+        
+        if (weights_df["Poids Sharpe max"] > 0).any():
+            fig_pie1 = px.pie(weights_df, names="Banque", values="Poids Sharpe max", title="Répartition portefeuille Sharpe max")
+            st.plotly_chart(fig_pie1, use_container_width=True)
+        
+        if (weights_df["Poids variance minimale"] > 0).any():
+            fig_pie2 = px.pie(weights_df, names="Banque", values="Poids variance minimale", title="Répartition portefeuille variance minimale")
+            st.plotly_chart(fig_pie2, use_container_width=True)
 
 with tab5:
     st.subheader("Frontière efficiente")
-
+    
     frontier_returns = []
     frontier_vols = []
-
-    target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 30)
-
-    for target in target_returns:
-        cons = (
-            {"type": "eq", "fun": lambda w: np.sum(w) - 1},
-            {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
-        )
-
-        result = minimize(
-            min_vol,
-            init,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=cons
-        )
-
-        if result.success:
-            w = result.x
-            frontier_returns.append(port_return(w))
-            frontier_vols.append(port_vol(w))
-
-    fig_frontier = go.Figure()
-
-    if frontier_vols:
+    
+    try:
+        target_returns = np.linspace(mean_returns.min(), mean_returns.max(), 30)
+        
+        for target in target_returns:
+            cons = (
+                {"type": "eq", "fun": lambda w: np.sum(w) - 1},
+                {"type": "eq", "fun": lambda w, t=target: port_return(w) - t}
+            )
+            
+            result = minimize(
+                min_vol,
+                init,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=cons
+            )
+            
+            if result.success:
+                w = result.x
+                frontier_returns.append(float(port_return(w)))
+                frontier_vols.append(float(port_vol(w)))
+        
+        fig_frontier = go.Figure()
+        
+        if frontier_vols:
+            fig_frontier.add_trace(go.Scatter(
+                x=frontier_vols,
+                y=frontier_returns,
+                mode="lines",
+                name="Frontière efficiente",
+                line=dict(color="blue", width=2)
+            ))
+        
         fig_frontier.add_trace(go.Scatter(
-            x=frontier_vols,
-            y=frontier_returns,
-            mode="lines",
-            name="Frontière efficiente",
-            line=dict(color="blue", width=2)
+            x=[float(vol_sharpe)],
+            y=[float(ret_sharpe)],
+            mode="markers",
+            name="Sharpe max",
+            marker=dict(size=14, color="red")
         ))
+        
+        fig_frontier.add_trace(go.Scatter(
+            x=[float(vol_minvar)],
+            y=[float(ret_minvar)],
+            mode="markers",
+            name="Variance minimale",
+            marker=dict(size=14, color="green")
+        ))
+        
+        fig_frontier.update_layout(
+            title="Frontière efficiente de Markowitz",
+            xaxis_title="Risque / Volatilité",
+            yaxis_title="Rentabilité"
+        )
+        
+        fig_frontier.update_xaxes(tickformat=".0%")
+        fig_frontier.update_yaxes(tickformat=".0%")
+        
+        st.plotly_chart(fig_frontier, use_container_width=True)
+        
+    except Exception as e:
+        st.warning(f"Erreur lors du calcul de la frontière efficiente : {e}")
 
-    fig_frontier.add_trace(go.Scatter(
-        x=[vol_sharpe],
-        y=[ret_sharpe],
-        mode="markers",
-        name="Sharpe max",
-        marker=dict(size=14, color="red")
-    ))
-
-    fig_frontier.add_trace(go.Scatter(
-        x=[vol_minvar],
-        y=[ret_minvar],
-        mode="markers",
-        name="Variance minimale",
-        marker=dict(size=14, color="green")
-    ))
-
-    fig_frontier.update_layout(
-        title="Frontière efficiente de Markowitz",
-        xaxis_title="Risque / Volatilité",
-        yaxis_title="Rentabilité"
-    )
-
-    fig_frontier.update_xaxes(tickformat=".0%")
-    fig_frontier.update_yaxes(tickformat=".0%")
-
-    st.plotly_chart(fig_frontier, use_container_width=True)
+# ... (la suite reste identique)
 
 with tab6:
     st.subheader("🤖 Recommandations intelligentes")
-
-    st.info("Cette analyse est indicative et ne constitue pas un conseil financier personnalisé.")
-
-    st.success(f"🏆 Meilleure banque selon le modèle : {best_bank}")
-
-    st.dataframe(
-        ranking.style.format({
-            "Rentabilité annualisée": "{:.2%}",
-            "Volatilité annualisée": "{:.2%}",
-            "Sharpe individuel": "{:.4f}",
-            "Max Drawdown": "{:.2%}",
-            "VaR 95%": "{:.2%}",
-            "Expected Shortfall": "{:.2%}",
-            "Beta marché": "{:.4f}",
-            "Score": "{:.0f}"
-        }),
-        use_container_width=True
-    )
-
-    if not ranking.empty:
-        fig_score = px.bar(ranking, y="Score", color="Recommandation", title="Classement intelligent des banques")
-        st.plotly_chart(fig_score, use_container_width=True)
-    else:
-        st.info("Données de classement non disponibles")
-
-    # Nettoyer les données pour le graphique de recommandation
-    ranking_clean = ranking.reset_index().rename(columns={"index": "Banque"})
-    ranking_clean = ranking_clean.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
     
-    if not ranking_clean.empty:
-        fig_reco = px.scatter(
-            ranking_clean,
-            x="Volatilité annualisée",
-            y="Rentabilité annualisée",
-            color="Recommandation",
-            size="Sharpe individuel",
-            text="Banque",
-            title="Carte de recommandation"
+    st.info("Cette analyse est indicative et ne constitue pas un conseil financier personnalisé.")
+    
+    if not ranking.empty:
+        st.success(f"🏆 Meilleure banque selon le modèle : {best_bank}")
+        
+        st.dataframe(
+            ranking.style.format({
+                "Rentabilité annualisée": "{:.2%}",
+                "Volatilité annualisée": "{:.2%}",
+                "Sharpe individuel": "{:.4f}",
+                "Max Drawdown": "{:.2%}",
+                "VaR 95%": "{:.2%}",
+                "Expected Shortfall": "{:.2%}",
+                "Beta marché": "{:.4f}",
+                "Score": "{:.0f}"
+            }),
+            use_container_width=True
         )
-        fig_reco.update_xaxes(tickformat=".0%")
-        fig_reco.update_yaxes(tickformat=".0%")
-        st.plotly_chart(fig_reco, use_container_width=True)
-    else:
-        st.info("Pas assez de données valides pour afficher la carte de recommandation")
-
+        
+        if len(ranking) > 1:
+            fig_score = px.bar(ranking, y="Score", color="Recommandation", title="Classement intelligent des banques")
+            st.plotly_chart(fig_score, use_container_width=True)
+        
+        # Carte de recommandation
+        ranking_clean = ranking.reset_index().rename(columns={"index": "Banque"})
+        ranking_clean = convert_numpy_types(ranking_clean)
+        ranking_clean = ranking_clean.replace([np.inf, -np.inf], np.nan).dropna(subset=["Volatilité annualisée", "Rentabilité annualisée", "Sharpe individuel"])
+        
+        if not ranking_clean.empty and len(ranking_clean) > 1:
+            fig_reco = px.scatter(
+                ranking_clean,
+                x="Volatilité annualisée",
+                y="Rentabilité annualisée",
+                color="Recommandation",
+                size="Sharpe individuel",
+                text="Banque",
+                title="Carte de recommandation"
+            )
+            fig_reco.update_xaxes(tickformat=".0%")
+            fig_reco.update_yaxes(tickformat=".0%")
+            st.plotly_chart(fig_reco, use_container_width=True)
+    
     st.write("""
     Le modèle classe les banques selon la rentabilité, le risque, le Sharpe,
     le drawdown, la VaR et l'Expected Shortfall.
     """)
-
+    
     st.warning(
         "Avant d'investir réellement, il faut vérifier la liquidité, les frais, "
         "la fiscalité, la réglementation et les conditions d'ouverture d'un compte titres."
@@ -692,54 +723,51 @@ with tab6:
 
 with tab7:
     st.subheader("💼 Simulation d'investissement")
-
+    
     st.write(f"Capital simulé : **{capital:,.2f}**")
-
-    invest_sharpe = weights_df[["Banque", "Montant Sharpe max"]].copy()
-
-    st.subheader("Montants à investir - Sharpe max")
-    st.dataframe(
-        invest_sharpe.style.format({"Montant Sharpe max": "{:,.2f}"}),
-        use_container_width=True
-    )
-
-    invest_sharpe_nonzero = invest_sharpe[invest_sharpe["Montant Sharpe max"] > 0]
-    if not invest_sharpe_nonzero.empty:
-        fig_invest1 = px.pie(
-            invest_sharpe_nonzero,
-            names="Banque",
-            values="Montant Sharpe max",
-            title="Répartition du capital - Sharpe max"
+    
+    if not weights_df.empty:
+        invest_sharpe = weights_df[["Banque", "Montant Sharpe max"]].copy()
+        
+        st.subheader("Montants à investir - Sharpe max")
+        st.dataframe(
+            invest_sharpe.style.format({"Montant Sharpe max": "{:,.2f}"}),
+            use_container_width=True
         )
-        st.plotly_chart(fig_invest1, use_container_width=True)
-    else:
-        st.info("Aucun montant positif pour le portefeuille Sharpe max")
-
-    invest_minvar = weights_df[["Banque", "Montant variance minimale"]].copy()
-
-    st.subheader("Montants à investir - variance minimale")
-    st.dataframe(
-        invest_minvar.style.format({"Montant variance minimale": "{:,.2f}"}),
-        use_container_width=True
-    )
-
-    invest_minvar_nonzero = invest_minvar[invest_minvar["Montant variance minimale"] > 0]
-    if not invest_minvar_nonzero.empty:
-        fig_invest2 = px.pie(
-            invest_minvar_nonzero,
-            names="Banque",
-            values="Montant variance minimale",
-            title="Répartition du capital - variance minimale"
+        
+        invest_sharpe_nonzero = invest_sharpe[invest_sharpe["Montant Sharpe max"] > 0]
+        if not invest_sharpe_nonzero.empty:
+            fig_invest1 = px.pie(
+                invest_sharpe_nonzero,
+                names="Banque",
+                values="Montant Sharpe max",
+                title="Répartition du capital - Sharpe max"
+            )
+            st.plotly_chart(fig_invest1, use_container_width=True)
+        
+        invest_minvar = weights_df[["Banque", "Montant variance minimale"]].copy()
+        
+        st.subheader("Montants à investir - variance minimale")
+        st.dataframe(
+            invest_minvar.style.format({"Montant variance minimale": "{:,.2f}"}),
+            use_container_width=True
         )
-        st.plotly_chart(fig_invest2, use_container_width=True)
-    else:
-        st.info("Aucun montant positif pour le portefeuille variance minimale")
-
+        
+        invest_minvar_nonzero = invest_minvar[invest_minvar["Montant variance minimale"] > 0]
+        if not invest_minvar_nonzero.empty:
+            fig_invest2 = px.pie(
+                invest_minvar_nonzero,
+                names="Banque",
+                values="Montant variance minimale",
+                title="Répartition du capital - variance minimale"
+            )
+            st.plotly_chart(fig_invest2, use_container_width=True)
+    
     profile = st.selectbox(
         "Profil investisseur",
         ["Prudent", "Équilibré", "Dynamique"]
     )
-
+    
     if profile == "Prudent":
         st.success("Profil prudent : privilégier le portefeuille à variance minimale.")
     elif profile == "Équilibré":
@@ -749,10 +777,10 @@ with tab7:
 
 with tab8:
     st.subheader("Télécharger le rapport Excel")
-
+    
     try:
         output = io.BytesIO()
-
+        
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
             selected_prices.to_excel(writer, sheet_name="Prix")
             returns.to_excel(writer, sheet_name="Rendements")
@@ -762,7 +790,7 @@ with tab8:
             cov_matrix.to_excel(writer, sheet_name="Covariance")
             corr_matrix.to_excel(writer, sheet_name="Correlation")
             weights_df.to_excel(writer, sheet_name="Poids", index=False)
-
+        
         st.download_button(
             label="Télécharger le rapport complet",
             data=output.getvalue(),
